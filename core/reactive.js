@@ -20,6 +20,13 @@ const HOSTILE_NAMES = new Set([
   'vex', 'warden', 'breeze', 'bogged'
 ])
 
+const RANGED_HOSTILE_NAMES = new Set([
+  'skeleton', 'stray', 'bogged', 'blaze', 'ghast', 'pillager', 'witch',
+  'shulker', 'guardian', 'elder_guardian', 'phantom'
+])
+const NO_MELEE_HOSTILE_NAMES = new Set([
+  'creeper', 'enderman', 'warden'
+])
 const DANGER_BLOCKS = new Set(['lava', 'fire', 'soul_fire', 'magma_block', 'cactus', 'sweet_berry_bush', 'wither_rose'])
 const WATER_BLOCKS = new Set(['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass', 'flowing_water'])
 
@@ -45,16 +52,20 @@ function round (n, digits = 2) {
 function nearestHostile (bot, radius) {
   if (!bot.entity) return null
   let best = null
+  const threats = []
   for (const entity of Object.values(bot.entities || {})) {
     if (!entity || entity === bot.entity) continue
     if (!HOSTILE_NAMES.has(entity.name)) continue
     const dist = distance3(bot.entity.position, entity.position)
     if (dist > radius) continue
+    threats.push({ entity, distance: dist })
     if (!best || dist < best.distance) best = { entity, distance: dist }
   }
+  if (!best) return null
+  threats.sort((a, b) => a.distance - b.distance)
+  best.threats = threats
   return best
 }
-
 function findNearestDryLand (bot, radius = 6) {
   if (!bot.entity) return null
   const p = bot.entity.position
@@ -98,12 +109,19 @@ class ReactiveController {
     this._hostileScanCounter = 0
     this._lastThreatPos = null
     this._lastEscapeTarget = null
+    this._lastCloseFleeRepathAt = 0
     this._lastHazardLogAt = 0
     this._lastWaterLogAt = 0
     this._autoEatBusy = false
     this._autoEatAt = 0
     this._autoGearBusy = false
     this._autoGearAt = 0
+    this._lastHealth = null
+    this._lastDamagedAt = 0
+    this._damageTaken = 0
+    this._lastAttackAt = 0
+    this._lastCombatMoveAt = 0
+    this._combatMoveSign = 1
     this.shuttingDown = false
 
     bot.reactiveController = this
@@ -147,6 +165,7 @@ class ReactiveController {
   _transition (next, reason, extra = {}) {
     if (this.state === next) return
     const prev = this.state
+    if (prev === STATE.ENGAGING) this._stopCombatControls()
     this.state = next
     this.transitionCount++
     const t = { from: prev, to: next, reason, ...extra, at: Date.now() }
@@ -164,17 +183,16 @@ class ReactiveController {
     this.lastTick = now
 
     if (!this.bot.entity || !Number.isFinite(this.bot.health)) return
-
-    // 1. Critical health logout
-    if (this.bot.health > 0 && this.bot.health <= (this.cfg.criticalHealthLogoutThreshold ?? 4)) {
-      this._transition(STATE.EMERGENCY, 'critical-health-logout', { health: this.bot.health })
-      this._ensureToken('EMERGENCY')
-      this.bot.emit('reactive:emergency-logout', { health: this.bot.health })
-      try { this.bot.quit('emergency:critical-health') } catch {}
-      this.shuttingDown = true
-      return
+    const previousHealth = this._lastHealth
+    if (Number.isFinite(previousHealth) && this.bot.health < previousHealth) {
+      this._lastDamagedAt = now
+      this._damageTaken += previousHealth - this.bot.health
     }
+    this._lastHealth = this.bot.health
 
+    // 1. Critical health is handled inside _startFlee when no verified escape
+    //    path exists. At critical health we still prefer a verified flee path
+    //    over immediately logging out.
     // 2. Water escape
     if (this._scanWater()) {
       this._waterEscapeClearSince = 0
@@ -246,6 +264,85 @@ class ReactiveController {
     this.bot.setControlState('jump', false)
   }
 
+  _stopCombatControls () {
+    for (const c of ['forward', 'back', 'left', 'right', 'jump', 'sprint']) {
+      this.bot.setControlState(c, false)
+    }
+  }
+
+  _lookAtThreat (threat) {
+    if (!threat || !threat.entity) return false
+    try {
+      const t = threat.entity
+      const eye = t.position.offset(0, (t.height || 1.6) * 0.8, 0)
+      this.bot.lookAt(eye, true)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  _canAttack (threat, now) {
+    if (!threat || !threat.entity) return false
+    const range = this.cfg.meleeAttackRange ?? 3.5
+    if (threat.distance > range) return false
+    return now - this._lastAttackAt >= (this.cfg.meleeAttackIntervalMs ?? 500)
+  }
+
+  _tryAttack (threat, now) {
+    if (!this._canAttack(threat, now)) return false
+    this._lookAtThreat(threat)
+    try {
+      this.bot.attack(threat.entity)
+      this._lastAttackAt = now
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  _strafe (now) {
+    if (this.cfg.meleeStrafeEnabled === false) return
+    const interval = this.cfg.meleeStrafeIntervalMs ?? 900
+    if (now - this._lastCombatMoveAt < interval) return
+    this._lastCombatMoveAt = now
+    const sign = this._combatMoveSign
+    this._combatMoveSign *= -1
+    this.bot.setControlState('left', sign > 0)
+    this.bot.setControlState('right', sign < 0)
+    setTimeout(() => {
+      if (this.state === STATE.ENGAGING || this.state === STATE.NORMAL) {
+        this.bot.setControlState('left', false)
+        this.bot.setControlState('right', false)
+      }
+    }, Math.min(260, Math.max(120, interval / 4)))
+  }
+
+  _updateEngagement (threat, now) {
+    if (!threat || this.state !== STATE.ENGAGING) return
+    this._lookAtThreat(threat)
+    if (this.cfg.meleeStrafeEnabled !== false) this._strafe(now)
+    if (threat.distance > (this.cfg.meleeAttackRange ?? 3.5)) {
+      this.bot.setControlState('forward', true)
+    } else {
+      this.bot.setControlState('forward', false)
+      this._tryAttack(threat, now)
+    }
+  }
+
+  _defensiveCombat (threat, now) {
+    if (!threat) return
+    this._lookAtThreat(threat)
+    if (combat.hasShield(this.bot)) {
+      try { this.bot.activateItem(true) } catch {}
+    }
+    if (this.cfg.meleeStrafeEnabled !== false) this._strafe(now)
+    const name = String(threat.entity.name || '')
+    const canMelee = !RANGED_HOSTILE_NAMES.has(name) && !NO_MELEE_HOSTILE_NAMES.has(name)
+    if (canMelee && threat.distance <= (this.cfg.defensiveAttackRange ?? 4)) {
+      this._tryAttack(threat, now)
+    }
+  }
   _applyWaterEscape (now) {
     const land = findNearestDryLand(this.bot, 6)
     if (land && this.pathfinderOwner && this.movements) {
@@ -304,7 +401,8 @@ class ReactiveController {
     // User preference: only flee when low health AND we can verify an escape path.
     if (lowHealth) {
       if (this.state === STATE.FLEEING && this._fleeingFrom && this._fleeingFrom.id === threat.entity.id) {
-        if (this._shouldRepathFlee(threat)) {
+        if (this._shouldRepathFlee(threat) || this._shouldRepathCloseFlee(threat, now)) {
+          this._lastCloseFleeRepathAt = now
           this._startFlee(threat, now)
         }
         return
@@ -320,21 +418,34 @@ class ReactiveController {
       return
     }
 
-    // Optional engage policy. Default false keeps us from pointless auto combat.
-    if (this.cfg.engageOverFlee === true && this._canEngage(threat)) {
-      if (this.state !== STATE.ENGAGING) {
-        this._engaging = threat.entity
-        this._transition(STATE.ENGAGING, 'hostile-engage', { entity: threat.entity.name, dist: round(threat.distance) })
-      }
-      if (threat.distance <= 3.5) {
-        try { this.bot.attack(threat.entity) } catch {}
+    // Fight when explicitly configured, or when we recently took damage and are
+    // capable of fighting the specific threat. Ranged/explosive threats never
+    // trigger a melee rush; they get a shield/strafe defense instead.
+    const recentlyAttacked = now - this._lastDamagedAt < (this.cfg.defendWhenAttackedWindowMs ?? 2000)
+    const wantEngage = this.cfg.engageOverFlee === true || recentlyAttacked
+    if (wantEngage) {
+      if (this._canEngage(threat)) {
+        if (this.state !== STATE.ENGAGING) {
+          this._engaging = threat.entity
+          this._transition(STATE.ENGAGING, 'hostile-engage', { entity: threat.entity.name, dist: round(threat.distance) })
+        }
+        this._updateEngagement(threat, now)
+      } else {
+        if (this.state === STATE.ENGAGING) {
+          this._engaging = null
+          this._transition(STATE.NORMAL, 'engage-policy-denied')
+        }
+        this._defensiveCombat(threat, now)
       }
     }
   }
 
   _canEngage (threat) {
     if (!threat?.entity) return false
-    if ((this.cfg.maxMeleeEngageThreatCount ?? 1) < 1) return false
+    const name = String(threat.entity.name || '')
+    if (RANGED_HOSTILE_NAMES.has(name) || NO_MELEE_HOSTILE_NAMES.has(name)) return false
+    const threatCount = Array.isArray(threat.threats) && threat.threats.length ? threat.threats.length : 1
+    if ((this.cfg.maxMeleeEngageThreatCount ?? 1) < threatCount) return false
     const held = this.bot.heldItem
     const best = combat.bestMeleeWeapon(this.bot.inventory.items())
     if (!best && !(held && combat.isMeleeWeapon(held))) return false
@@ -343,7 +454,6 @@ class ReactiveController {
     if (currentArmor < (this.cfg.minArmorScoreToEngage ?? 0)) return false
     return true
   }
-
   _shouldRepathFlee (threat) {
     const last = this._lastThreatPos
     if (!last) return true
@@ -351,6 +461,16 @@ class ReactiveController {
     return moved >= (this.cfg.fleeReplanThresholdBlocks ?? 4)
   }
 
+  _shouldRepathCloseFlee (threat, now) {
+    const distance = Number(threat?.distance)
+    const threshold = Number.isFinite(this.cfg.fleeCloseRepathDistance) ? Math.max(0, this.cfg.fleeCloseRepathDistance) : 3
+    if (!Number.isFinite(distance) || distance > threshold) return false
+    try {
+      if (this.pathfinderOwner?.isIdle?.() === true) return true
+    } catch {}
+    const replanMs = Number.isFinite(this.cfg.fleeCloseRepathMs) ? Math.max(100, this.cfg.fleeCloseRepathMs) : 500
+    return now - this._lastCloseFleeRepathAt >= replanMs
+  }
   _startFlee (threat, now) {
     if (!this.pathfinderOwner || !this.movements) return
 
@@ -362,14 +482,19 @@ class ReactiveController {
         this._fleeingFrom = null
         this._transition(STATE.NORMAL, 'no-verified-escape-path')
       }
-      this.bot.emit('reactive:log', { level: 'warn', message: `低血量但无可靠逃跑路径，不转身逃跑 (${threat.entity.name} ${round(threat.distance)}m)` })
+      this.bot.emit('reactive:log', { level: 'warn', message: `low-health-no-escape: staying to fight (${threat.entity.name} ${round(threat.distance)}m)` })
+      if (this.bot.health > 0 && this.bot.health <= (this.cfg.criticalHealthLogoutThreshold ?? 4)) {
+        if (!this.shuttingDown) {
+          this._transition(STATE.EMERGENCY, 'critical-health-no-escape', { health: this.bot.health })
+          this._ensureToken('EMERGENCY')
+          this.bot.emit('reactive:emergency-logout', { health: this.bot.health, reason: 'critical-health-no-escape' })
+          try { this.bot.quit('emergency:critical-health') } catch {}
+          this.shuttingDown = true
+        }
+        return
+      }
       this._prepareCombatLoadout(now)
-      if (combat.hasShield(this.bot)) {
-        try { this.bot.activateItem(true) } catch {}
-      }
-      if (threat.distance <= 4) {
-        try { this.bot.attack(threat.entity) } catch {}
-      }
+      this._defensiveCombat(threat, now)
       return
     }
 
@@ -438,7 +563,12 @@ class ReactiveController {
         if (head && (WATER_BLOCKS.has(head.name) || DANGER_BLOCKS.has(head.name))) continue
         if (ground && (WATER_BLOCKS.has(ground.name) || DANGER_BLOCKS.has(ground.name))) continue
 
-        const threatDist = distance3({ x, y, z }, threat.entity.position)
+        const threats = Array.isArray(threat.threats) && threat.threats.length ? threat.threats : [threat]
+        let threatDist = Infinity
+        for (const entry of threats) {
+          const d = distance3(new Vec3(x, y, z), entry.entity.position)
+          if (d < threatDist) threatDist = d
+        }
         const safetyBonus = Math.max(0, 10 - threatDist)
         const score = pathLength * 1.0 - safetyBonus * 1.5 + (result.status === 'partial' ? 4 : 0)
         candidates.push({ target, pathLength, status: result.status, threatDist, score })

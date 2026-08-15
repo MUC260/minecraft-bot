@@ -16,6 +16,9 @@ class Brain {
     this.goal = '自由行动：观察环境，合理互动。'
     this.lastPlan = []
     this.lastResults = []
+    this._lastPlanKey = ''
+    this._repeatStreak = 0
+    this._forceVary = false
     this.systemPrompt = this._loadPrompt()
     this._onQueueEmpty = () => this._kick(150)
     this._onQueueFailure = ({ call, result }) => {
@@ -98,6 +101,15 @@ class Brain {
 
       const plan = actions.map(a => ({ name: a.name, args: a.args }))
       this.lastPlan = plan
+      const planKey = JSON.stringify(plan.map(a => [a.name, a.args || {}]))
+      if (planKey === this._lastPlanKey) {
+        this._repeatStreak++
+      } else {
+        this._repeatStreak = 0
+        this._forceVary = false
+      }
+      this._lastPlanKey = planKey
+      if (this._repeatStreak >= 3) this._forceVary = true
       this.agent.emit('aiPlan', { actions: plan, at: Date.now() })
       this.executor?.enqueue(actions)
     } catch (e) {
@@ -115,7 +127,7 @@ class Brain {
       worldState: snapshot,
       previousPlan: this.lastPlan.slice(0, 6),
       previousResults: this.lastResults.slice(-8),
-      instruction: '从可用工具中选择下一步。若上一轮动作已成功，继续推进目标；若失败或状态未变化，换一个可执行方案。'
+      instruction: this._forceVary ? '上一次方案已重复多次，必须换一个动作或改变参数，禁止再次提交完全相同的计划。' : '从可用工具中选择下一步。若上一轮动作已成功，继续推进目标；若失败或状态未变化，换一个可执行方案。'
     }
   }
 

@@ -1,47 +1,65 @@
 {
-  "mc": {
-    "host": "localhost",
-    "port": 25565,
-    "username": "MyBot",
-    "password": "",
-    "auth": "offline"
-  },
-  "ai": {
-    "enabled": true,
-    "baseUrl": "https://api.openai.com/v1",
-    "apiKey": "sk-xxx",
-    "model": "gpt-4o-mini",
-    "temperature": 0.2,
-    "maxTokens": 1200,
-    "intervalMs": 1500,
-    "planAhead": true
-  },
-  "api": {
-    "host": "127.0.0.1",
-    "port": 8787
-  },
-  "reactive": {
-    "lowHealthFleeThreshold": 8,
-    "criticalHealthLogoutThreshold": 4,
-    "hostileScanRadius": 16,
-    "hostileExitRadius": 42,
-    "hostileExitDebounceMs": 500,
-    "engageOverFlee": false,
-    "requireShieldToEngage": false,
-    "maxMeleeEngageThreatCount": 1,
-    "minArmorScoreToEngage": 6,
-    "fleeRange": 12,
-    "fleeMinThreatDistance": 2.5,
-    "fleeMinPathLength": 5,
-    "fleeEscapeTestDistance": 10,
-    "fleeReplanThresholdBlocks": 4,
-    "maxInterruptionsPerTarget": 3,
-    "resumeDebounceMs": 1000,
-    "autoEatStartAt": 18,
-    "reactiveConsumablesEnabled": true
-  },
-  "executor": {
-    "skillTimeoutMs": 120000,
-    "resumeGateTimeoutMs": 30000
-  }
+    "mc":  {
+               "host":  "localhost",
+               "port":  25565,
+               "username":  "MyBot",
+               "password":  "",
+               "auth":  "offline",
+               "reconnect":  true,
+               "reconnectBaseDelayMs":  3000,
+               "reconnectMaxDelayMs":  60000,
+               "reconnectMaxAttempts":  -1,
+               "reconnectAfterEmergencyLogout":  false
+           },
+    "ai":  {
+               "enabled":  true,
+               "baseUrl":  "https://api.openai.com/v1",
+               "apiKey":  "sk-xxx",
+               "model":  "gpt-4o-mini",
+               "temperature":  0.2,
+               "maxTokens":  1200,
+               "intervalMs":  1500,
+               "planAhead":  true
+           },
+    "api":  {
+                "host":  "127.0.0.1",
+                "port":  8787
+            },
+    "logging":  {
+                    "file":  true,
+                    "dir":  "logs",
+                    "name":  "agent.log"
+                },
+    "reactive":  {
+                     "lowHealthFleeThreshold":  8,
+                     "criticalHealthLogoutThreshold":  4,
+                     "hostileScanRadius":  16,
+                     "hostileExitRadius":  42,
+                     "hostileExitDebounceMs":  500,
+                     "engageOverFlee":  false,
+                     "requireShieldToEngage":  false,
+                     "maxMeleeEngageThreatCount":  1,
+                     "minArmorScoreToEngage":  6,
+                     "fleeRange":  12,
+                     "fleeMinThreatDistance":  2.5,
+                     "fleeMinPathLength":  5,
+                     "fleeEscapeTestDistance":  10,
+                     "fleeReplanThresholdBlocks":  4,
+                     "maxInterruptionsPerTarget":  3,
+                     "resumeDebounceMs":  1000,
+                     "autoEatStartAt":  18,
+                     "reactiveConsumablesEnabled":  true,
+                     "meleeStrafeEnabled":  true,
+                     "meleeStrafeIntervalMs":  900,
+                     "meleeAttackRange":  3.5,
+                     "meleeAttackIntervalMs":  500,
+                     "defensiveAttackRange":  4,
+                     "defendWhenAttackedWindowMs":  2000,
+                     "fleeCloseRepathDistance":  3,
+                     "fleeCloseRepathMs":  500
+                 },
+    "executor":  {
+                     "skillTimeoutMs":  120000,
+                     "resumeGateTimeoutMs":  30000
+                 }
 }

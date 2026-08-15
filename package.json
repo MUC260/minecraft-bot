@@ -1,46 +1,47 @@
 {
-  "name": "minecraft-bot",
-  "version": "0.2.0",
-  "private": true,
-  "description": "AI-driven Minecraft bot framework: lightweight desktop + server deployable.",
-  "main": "index.js",
-  "type": "commonjs",
-  "engines": {
-    "node": ">=18"
-  },
-  "scripts": {
-    "start": "node index.js",
-    "server": "node index.js",
-    "desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1",
-    "check": "node scripts/check.js",
-    "build:win": "node scripts/build-exe.js",
-    "dist": "node scripts/build-exe.js",
-    "build:exe": "node scripts/build-exe.js"
-  },
-  "dependencies": {
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "minecraft-data": "^3.113.1",
-    "mineflayer": "^4.37.1",
-    "mineflayer-pathfinder": "^2.4.5",
-    "vec3": "^0.2.0",
-    "ws": "^8.21.3"
-  },
-  "devDependencies": {
-    "@yao-pkg/pkg": "^6.22.0"
-  },
-  "pkg": {
-    "targets": [
-      "node24-win-x64"
-    ],
-    "outputPath": "dist",
-    "compress": "Brotli",
-    "assets": [
-      "ui/**/*",
-      "ai/prompts/**/*",
-      "config.example.json",
-      ".env.example"
-    ]
-  },
-  "bin": "index.js"
+    "name":  "minecraft-bot",
+    "version":  "0.2.0",
+    "private":  true,
+    "description":  "AI-driven Minecraft bot framework: lightweight desktop + server deployable.",
+    "main":  "index.js",
+    "type":  "commonjs",
+    "engines":  {
+                    "node":  "\u003e=18"
+                },
+    "scripts":  {
+                    "start":  "node index.js",
+                    "server":  "node index.js",
+                    "desktop":  "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1",
+                    "check":  "node scripts/check.js",
+                    "build:win":  "node scripts/build-exe.js",
+                    "dist":  "node scripts/build-exe.js",
+                    "build:exe":  "node scripts/build-exe.js",
+                    "test":  "node scripts/smoke.js"
+                },
+    "dependencies":  {
+                         "dotenv":  "^17.4.2",
+                         "express":  "^5.2.1",
+                         "minecraft-data":  "^3.113.1",
+                         "mineflayer":  "^4.37.1",
+                         "mineflayer-pathfinder":  "^2.4.5",
+                         "vec3":  "^0.2.0",
+                         "ws":  "^8.21.3"
+                     },
+    "devDependencies":  {
+                            "@yao-pkg/pkg":  "^6.22.0"
+                        },
+    "pkg":  {
+                "targets":  [
+                                "node24-win-x64"
+                            ],
+                "outputPath":  "dist",
+                "compress":  "Brotli",
+                "assets":  [
+                               "ui/**/*",
+                               "ai/prompts/**/*",
+                               "config.example.json",
+                               ".env.example"
+                           ]
+            },
+    "bin":  "index.js"
 }

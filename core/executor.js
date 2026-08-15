@@ -16,6 +16,23 @@ class SkillExecutor extends EventEmitter {
     this._runPromise = null
     this._running = false
     this._abortRequested = false
+    this.currentStartedAt = 0
+    this.currentController = null
+    this._watchdogTimer = setInterval(() => this._watchdog(), Math.min(5000, this.skillTimeoutMs || 5000))
+    this._watchdogTimer.unref?.()
+  }
+
+  _watchdog () {
+    if (!this.currentCall || !this.currentController) return
+    const elapsed = Date.now() - this.currentStartedAt
+    if (elapsed <= (this.skillTimeoutMs || 120000) + 10000) return
+    this.emit('skill:stuck', { call: this.currentCall, elapsedMs: elapsed })
+    try { this.currentController.abort('executor-watchdog') } catch {}
+  }
+
+  destroy () {
+    if (this._watchdogTimer) clearInterval(this._watchdogTimer)
+    this._watchdogTimer = null
   }
 
   get busy () {
@@ -57,7 +74,9 @@ class SkillExecutor extends EventEmitter {
     while (this.queue.length > 0) {
       const call = this.queue[0]
       this.currentCall = call
+      this.currentStartedAt = Date.now()
       const controller = new AbortController()
+      this.currentController = controller
       this.pathfinderOwner?.bindSkillSignal(controller)
       this.emit('skill:start', { call, queueLeft: this.queue.length - 1 })
 
@@ -72,6 +91,8 @@ class SkillExecutor extends EventEmitter {
         result = { ok: false, reason: `skill threw: ${err.message || err}`, state: observations.build(this.bot) }
       } finally {
         this.pathfinderOwner?.unbindSkillSignal()
+        this.currentController = null
+        this.currentStartedAt = 0
       }
 
       if (result && result.preempted) {

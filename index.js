@@ -4,6 +4,8 @@ const BotAgent = require('./core/agent')
 const Brain = require('./ai/brain')
 const api = require('./api/server')
 
+logger.init(config.logging)
+
 async function main () {
   logger.info('Minecraft AI Bot 框架启动中...')
 

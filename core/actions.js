@@ -117,6 +117,140 @@ function findNearestBlock (bot, args) {
   return best ? best.block : null
 }
 
+function lowerBlockName (block) {
+  return String(block && block.name ? block.name : '').toLowerCase()
+}
+
+function bkey (pos) {
+  return `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`
+}
+
+function isLogLike (block) {
+  const n = lowerBlockName(block)
+  return n.endsWith('_log') || n === 'mushroom_stem' || n === 'crimson_stem' || n === 'warped_stem'
+}
+
+function isOreLike (block) {
+  const n = lowerBlockName(block)
+  return n.endsWith('_ore') || n === 'ancient_debris'
+}
+
+function findNearestBlockBy (bot, predicate, radius = 12, count = 128) {
+  if (!bot.findBlocks || !bot.entity) return null
+  let positions = []
+  try {
+    positions = bot.findBlocks({
+      matching: block => {
+        try { return !!predicate(block) } catch { return false }
+      },
+      maxDistance: radius,
+      count
+    })
+  } catch {
+    return null
+  }
+  if (!positions || !positions.length) return null
+  let best = null
+  for (const pos of positions) {
+    const block = bot.blockAt(pos)
+    if (!block) continue
+    const dist = bot.entity.position.distanceTo(block.position)
+    if (!best || dist < best.distance) best = { block, distance: dist }
+  }
+  return best ? best.block : null
+}
+
+function findNearestHostile (bot, radius = 16) {
+  if (!bot.entity) return null
+  let best = null
+  for (const entity of Object.values(bot.entities || {})) {
+    if (!entity || entity === bot.entity) continue
+    if (!observations.isHostileName(entity.name)) continue
+    const dist = bot.entity.position.distanceTo(entity.position)
+    if (dist > radius) continue
+    if (!best || dist < best.distance) best = { entity, distance: dist }
+  }
+  return best
+}
+
+const BUILD_BLOCK_PREFIXES = ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry', 'bamboo', 'crimson', 'warped']
+const BUILD_BLOCK_EXACT = new Set(['cobblestone', 'stone', 'dirt', 'sandstone', 'bricks', 'stone_bricks', 'netherrack', 'end_stone', 'mossy_cobblestone'])
+
+function isBuildBlock (item) {
+  if (!item) return false
+  const n = String(item.name || '').toLowerCase()
+  if (BUILD_BLOCK_EXACT.has(n)) return true
+  return n.endsWith('_planks') || n.endsWith('_log') || n.endsWith('_stem') || n.endsWith('_hyphae') || n === 'mushroom_stem'
+}
+
+function chooseBuildBlock (bot) {
+  const items = bot.inventory.items().filter(isBuildBlock)
+  if (!items.length) return null
+  const preferred = ['cobblestone', 'stone_bricks', 'oak_planks', 'spruce_planks', 'stone', 'dirt']
+  items.sort((a, b) => {
+    const ai = preferred.indexOf(String(a.name || '').toLowerCase())
+    const bi = preferred.indexOf(String(b.name || '').toLowerCase())
+    const rank = n => n === -1 ? 99 : n
+    return rank(ai) - rank(bi)
+  })
+  return items[0]
+}
+
+async function digConnected (bot, start, predicate, ctx, limit = 64) {
+  const startPos = new Vec3(Math.floor(start.x), Math.floor(start.y), Math.floor(start.z))
+  const seen = new Set()
+  const queue = [startPos]
+  seen.add(bkey(startPos))
+  let dug = 0
+
+  while (queue.length && dug < limit) {
+    throwIfAborted(ctx)
+    queue.sort((a, b) => bot.entity.position.distanceTo(a) - bot.entity.position.distanceTo(b))
+    const pos = queue.shift()
+    const block = bot.blockAt(pos)
+    if (!block || !predicate(block)) continue
+
+    const dist = bot.entity.position.distanceTo(block.position)
+    if (dist > 3.5) {
+      const nav = await pathNear(bot, ctx, block.position.x, block.position.y, block.position.z, 1.8, 45000)
+      if (nav && nav.preempted) return { preempted: true, reason: nav.reason || 'reactive preempt' }
+      if (nav && !nav.ok) throw new Error(nav.reason || 'unable to reach target block')
+    }
+
+    await raceWithAbort(bot.dig(block, true), ctx, () => {
+      if (typeof bot.stopDigging === 'function') bot.stopDigging()
+    })
+    dug++
+
+    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+    for (const [dx, dy, dz] of dirs) {
+      const npos = pos.offset(dx, dy, dz)
+      const key = bkey(npos)
+      if (seen.has(key)) continue
+      seen.add(key)
+      const nb = bot.blockAt(npos)
+      if (nb && predicate(nb)) queue.push(npos)
+    }
+  }
+
+  return { dug, preempted: false }
+}
+
+async function placeBuildBlock (bot, pos, ctx) {
+  const block = bot.blockAt(pos)
+  if (!block) throw new Error('target placement position missing')
+  if (block.boundingBox !== 'empty') return false
+  const ref = bot.blockAt(pos.offset(0, -1, 0))
+  if (!ref || ref.boundingBox === 'empty') return false
+  const item = chooseBuildBlock(bot)
+  if (!item) throw new Error('no building blocks in inventory')
+  const held = bot.heldItem
+  if (!held || held.name !== item.name) await bot.equip(item, 'hand')
+  try { await bot.lookAt(pos.offset(0, 0.5, 0), true) } catch {}
+  await raceWithAbort(bot.placeBlock(ref, new Vec3(0, 1, 0)), ctx, () => {})
+  return true
+}
+
 async function lookAtTarget (bot, args) {
   let entity = null
   if (args.username) {
@@ -283,7 +417,7 @@ const handlers = {
         label = `走向 ${x},${y},${z}`
       }
       const installed = setPathfinderGoal(bot, acq, goal)
-      if (!installed.ok) return { preempted: false, reason: installed.reason }
+      if (!installed.ok) throw new Error(installed.reason || '无法设置寻路目标')
       const r = await waitForGoal(bot, ctx, 60000)
       if (r.kind === 'preempted') return { preempted: true, reason: 'reactive 抢占 goto' }
       if (r.kind === 'reached') return label
@@ -359,6 +493,109 @@ const handlers = {
     return '已靠近掉落物'
   },
 
+  chopTree: async (bot, args, ctx) => {
+    const radius = Math.max(4, Math.min(Number(args.radius ?? 12), 24))
+    const block = findNearestBlockBy(bot, isLogLike, radius, 128)
+    if (!block) throw new Error('附近没有可砍的树木')
+    const maxBlocks = Math.max(1, Math.min(Number(args.max ?? 64), 128))
+    const result = await digConnected(bot, block.position, isLogLike, ctx, maxBlocks)
+    if (result.preempted) return result
+    return `砍树完成，共挖掘 ${result.dug} 块原木`
+  },
+
+  mineOreVein: async (bot, args, ctx) => {
+    const name = String(args.name || '').toLowerCase()
+    const predicate = name ? block => lowerBlockName(block) === name : isOreLike
+    const radius = Math.max(4, Math.min(Number(args.radius ?? 12), 24))
+    const block = findNearestBlockBy(bot, predicate, radius, 128)
+    if (!block) throw new Error('附近没有可开采的矿石')
+    const maxBlocks = Math.max(1, Math.min(Number(args.max ?? 48), 96))
+    const result = await digConnected(bot, block.position, predicate, ctx, maxBlocks)
+    if (result.preempted) return result
+    return `采矿完成：${block.name} 共 ${result.dug} 块`
+  },
+
+  hunt: async (bot, args, ctx) => {
+    const target = findEntity(bot, args)
+    if (!target) throw new Error('附近没有可攻击目标')
+    let attacks = 0
+    const maxAttacks = Math.max(5, Math.min(Number(args.max ?? 30), 60))
+    while (attacks < maxAttacks) {
+      throwIfAborted(ctx)
+      const entity = (bot.entities && bot.entities[target.id]) || target
+      if (!entity || entity === bot.entity) break
+      const dist = bot.entity.position.distanceTo(entity.position)
+      if (dist > 2.8) {
+        const nav = await pathNear(bot, ctx, entity.position.x, entity.position.y, entity.position.z, 1.8, 30000)
+        if (nav && nav.preempted) return nav
+        if (nav && !nav.ok) throw new Error(nav.reason || '无法接近目标')
+      }
+      try { await bot.lookAt(entity.position.offset(0, (entity.height || 1.6) * 0.8, 0), true) } catch {}
+      try { await bot.attack(entity) } catch {}
+      attacks++
+      await sleep(500, ctx)
+    }
+    return `狩猎结束，攻击 ${target.name || target.username || target.type} ${attacks} 次`
+  },
+
+  protect: async (bot, args, ctx) => {
+    const username = String(args.username || '').trim()
+    if (!username) throw new Error('protect 需要 username 参数')
+    const player = bot.players && bot.players[username]
+    if (!player || !player.entity) throw new Error('找不到玩家: ' + username)
+    const radius = Math.max(4, Math.min(Number(args.radius ?? 12), 32))
+    const threat = findNearestHostile(bot, radius)
+    if (threat) {
+      const target = threat.entity
+      if (threat.distance > 2.8) {
+        const nav = await pathNear(bot, ctx, target.position.x, target.position.y, target.position.z, 1.8, 30000)
+        if (nav && nav.preempted) return nav
+        if (nav && !nav.ok) throw new Error(nav.reason || '无法接近目标')
+      }
+      try { await bot.lookAt(target.position.offset(0, (target.height || 1.6) * 0.8, 0), true) } catch {}
+      try { await bot.attack(target) } catch {}
+      return `已为 ${username} 攻击 ${target.name || target.type}`
+    }
+    const dist = bot.entity.position.distanceTo(player.entity.position)
+    if (dist > 3) {
+      const nav = await pathNear(bot, ctx, player.entity.position.x, player.entity.position.y, player.entity.position.z, 3, 30000)
+      if (nav && nav.preempted) return nav
+      if (nav && !nav.ok) throw new Error(nav.reason || '无法接近目标')
+    }
+    return `正在跟随 ${username}`
+  },
+
+  buildShelter: async (bot, args, ctx) => {
+    if (!chooseBuildBlock(bot)) throw new Error('背包里没有可用于建筑的方块')
+    const bx = Math.floor(bot.entity.position.x)
+    const by = Math.floor(bot.entity.position.y)
+    const bz = Math.floor(bot.entity.position.z)
+    const placed = []
+    const roofY = by + 2
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const pos = new Vec3(bx + dx, roofY, bz + dz)
+        const current = bot.blockAt(pos)
+        if (current && current.boundingBox === 'empty') {
+          if (await placeBuildBlock(bot, pos, ctx)) placed.push(`${pos.x},${pos.y},${pos.z}`)
+        }
+      }
+    }
+    for (const dx of [-1, 1]) {
+      for (const dz of [-1, 1]) {
+        for (const level of [by, by + 1]) {
+          const pos = new Vec3(bx + dx, level, bz + dz)
+          const current = bot.blockAt(pos)
+          if (current && current.boundingBox === 'empty') {
+            if (await placeBuildBlock(bot, pos, ctx)) placed.push(`${pos.x},${pos.y},${pos.z}`)
+          }
+        }
+      }
+    }
+    if (!placed.length) throw new Error('避难所放置失败')
+    return `避难所搭建完成，共放置 ${placed.length} 个方块`
+  },
+
   equip: async (bot, args) => {
     const name = String(args.name || '').toLowerCase()
     const item = bot.inventory.items().find(i => i.name === name || (i.displayName && i.displayName.toLowerCase() === name))
@@ -411,8 +648,9 @@ async function executeStructured (bot, action, ctx = {}) {
     const args = action.args && typeof action.args === 'object' ? action.args : {}
     if (!name || !handlers[name]) return { ok: false, reason: '未知动作: ' + String(name), state: snapshot() }
     const result = await handlers[name](bot, args, ctx)
-    if (result && typeof result === 'object' && result.preempted) {
-      return { preempted: true, reason: result.reason || 'reactive 抢占', state: snapshot() }
+    if (result && typeof result === 'object') {
+      if (result.preempted) return { preempted: true, reason: result.reason || 'reactive 抢占', state: snapshot() }
+      if (result.ok === false) return { ok: false, reason: result.reason || '动作执行失败', state: snapshot() }
     }
     return { ok: true, reason: typeof result === 'string' ? result : 'done', result: result ?? null, state: snapshot() }
   } catch (err) {

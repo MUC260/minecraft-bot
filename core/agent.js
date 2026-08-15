@@ -1,4 +1,4 @@
-const EventEmitter = require('events')
+﻿const EventEmitter = require('events')
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
 const observations = require('./observations')
@@ -20,12 +20,23 @@ class BotAgent extends EventEmitter {
     this.executor = null
     this.reactive = null
     this.movements = null
+    this._stopping = false
+    this._reconnectTimer = null
+    this._reconnectAttempts = 0
+    this._lastEndReason = ''
   }
 
   start () {
+    this._stopping = false
+    this._reconnectAttempts = 0
+    this._createBot()
+    return this
+  }
+
+  _createBot () {
     const c = this.mc
     logger.info(`连接 Minecraft ${c.host}:${c.port} (${c.username}, ${c.auth})`)
-    this.bot = mineflayer.createBot({
+    const bot = mineflayer.createBot({
       host: c.host,
       port: c.port,
       username: c.username,
@@ -33,30 +44,30 @@ class BotAgent extends EventEmitter {
       auth: c.auth || 'offline',
       version: c.version || undefined
     })
-    this.bot.loadPlugin(pathfinder)
+    this.bot = bot
+    bot.loadPlugin(pathfinder)
 
-    this.pathfinderOwner = new PathfinderOwner(this.bot)
-    this.executor = new SkillExecutor(this.bot, {
+    this.pathfinderOwner = new PathfinderOwner(bot)
+    this.executor = new SkillExecutor(bot, {
       pathfinderOwner: this.pathfinderOwner,
       skillTimeoutMs: this.config.executor?.skillTimeoutMs ?? 120000,
       resumeDebounceMs: this.config.reactive?.resumeDebounceMs ?? 1000,
       resumeGateTimeoutMs: this.config.executor?.resumeGateTimeoutMs ?? 30000
     })
-    this.bot.skillExecutor = this.executor
-    this.reactive = new ReactiveController(this.bot, this.config.reactive || {}, {
+    bot.skillExecutor = this.executor
+    this.reactive = new ReactiveController(bot, this.config.reactive || {}, {
       pathfinderOwner: this.pathfinderOwner,
       movements: this.movements
     })
 
-    this._wire()
+    this._wire(bot)
     return this
   }
 
-  _wire () {
-    const bot = this.bot
-
+  _wire (bot) {
     bot.once('spawn', () => {
       this.connected = true
+      this._reconnectAttempts = 0
       try {
         const mcData = require('minecraft-data')(bot.version)
         this.movements = new Movements(bot, mcData)
@@ -78,15 +89,21 @@ class BotAgent extends EventEmitter {
     })
 
     bot.on('kicked', (reason) => {
+      const text = String(reason)
       this.connected = false
-      logger.warn('被踢出:', String(reason))
-      this.emit('status', this.status(String(reason)))
+      this._lastEndReason = text
+      logger.warn('被踢出:', text)
+      this.emit('status', this.status(text))
+      this._scheduleReconnect(text)
     })
 
     bot.on('end', (reason) => {
+      const text = String(reason)
       this.connected = false
-      logger.warn('连接断开:', String(reason))
-      this.emit('status', this.status(String(reason)))
+      this._lastEndReason = text
+      logger.warn('连接断开:', text)
+      this.emit('status', this.status(text))
+      this._scheduleReconnect(text)
     })
 
     bot.on('error', (err) => {
@@ -94,9 +111,39 @@ class BotAgent extends EventEmitter {
       this.emit('log', { level: 'error', message: err.message })
     })
 
-    bot.on('death', () => this.emit('log', { level: 'warn', message: '角色死亡' }))
+    bot.on('death', () => {
+      this.emit('log', { level: 'warn', message: '角色死亡' })
+    })
     bot.on('reactive:state', (t) => this.emit('reactiveState', t))
     bot.on('reactive:log', (item) => this.emit('log', item))
+  }
+
+  _scheduleReconnect (reason) {
+    if (this._stopping || this._reconnectTimer) return
+    const c = this.mc
+    if (!c.reconnect) return
+    const maxAttempts = Number(c.reconnectMaxAttempts ?? -1)
+    if (maxAttempts >= 0 && this._reconnectAttempts >= maxAttempts) {
+      logger.warn('达到最大重连次数，停止重连')
+      return
+    }
+    if (/emergency:critical-health/.test(reason) && !c.reconnectAfterEmergencyLogout) {
+      logger.warn('紧急低血下线，按配置不自动重连')
+      return
+    }
+
+    const base = Math.max(500, Number(c.reconnectBaseDelayMs ?? 3000))
+    const max = Math.max(base, Number(c.reconnectMaxDelayMs ?? 60000))
+    const delay = Math.min(max, base * Math.pow(2, this._reconnectAttempts))
+    this._reconnectAttempts++
+
+    logger.warn(`${delay}ms 后第 ${this._reconnectAttempts} 次重连...`)
+    this.emit('log', { level: 'warn', message: `${delay}ms 后尝试重连 (${this._reconnectAttempts})` })
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null
+      if (this._stopping) return
+      this._createBot()
+    }, delay)
   }
 
   snapshot () {
@@ -108,6 +155,7 @@ class BotAgent extends EventEmitter {
     return {
       connected: this.connected,
       reason: reason || null,
+      reconnectAttempts: this._reconnectAttempts,
       bot: snap.bot,
       reactive: this.reactive ? this.reactive.status() : null,
       executorBusy: this.executor ? this.executor.busy : false
@@ -129,8 +177,14 @@ class BotAgent extends EventEmitter {
   }
 
   stop () {
+    this._stopping = true
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer)
+      this._reconnectTimer = null
+    }
     if (this.executor) {
       try { this.executor.clear() } catch {}
+      try { this.executor.destroy() } catch {}
     }
     if (this.reactive) {
       this.reactive.shuttingDown = true
