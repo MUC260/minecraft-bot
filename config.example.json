@@ -1,7 +1,22 @@
 ﻿{
-  "host": "localhost",
-  "port": 25565,
-  "username": "BotName",
-  "password": "",
-  "auth": "offline"
+  "mc": {
+    "host": "localhost",
+    "port": 25565,
+    "username": "MyBot",
+    "password": "",
+    "auth": "offline"
+  },
+  "ai": {
+    "enabled": true,
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKey": "sk-xxx",
+    "model": "gpt-4o-mini",
+    "temperature": 0.2,
+    "maxTokens": 1200,
+    "intervalMs": 1500
+  },
+  "api": {
+    "host": "127.0.0.1",
+    "port": 8787
+  }
 }

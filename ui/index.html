@@ -1,0 +1,64 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Minecraft AI Bot</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="dot" id="dot"></span> Minecraft AI Bot</div>
+    <div class="controls">
+      <input id="goal" placeholder="目标，例如：去附近砍树" />
+      <button id="applyGoal" class="ghost">设置目标</button>
+      <button id="startAi">启动 AI</button>
+      <button id="stopAi" class="danger">停止 AI</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>连接</h2>
+      <div id="statusText" class="mono">加载中...</div>
+    </section>
+
+    <section class="card">
+      <h2>角色</h2>
+      <div id="botInfo" class="mono">-</div>
+    </section>
+
+    <section class="card">
+      <h2>AI</h2>
+      <div id="aiInfo" class="mono">-</div>
+    </section>
+
+    <section class="card wide">
+      <h2>聊天</h2>
+      <div id="chat" class="log"></div>
+    </section>
+
+    <section class="card wide">
+      <h2>事件</h2>
+      <div id="events" class="log"></div>
+    </section>
+
+    <section class="card wide">
+      <h2>手动控制</h2>
+      <div class="action-row">
+        <input id="actionName" placeholder="动作名：chat / move / goto / dig / equip" />
+        <input id="actionArgs" placeholder='参数 JSON：{"message":"hi"}' />
+        <button id="sendAction">执行</button>
+      </div>
+      <div id="actionResult" class="mono"></div>
+    </section>
+
+    <section class="card full">
+      <h2>实时观测</h2>
+      <pre id="obs">{}</pre>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

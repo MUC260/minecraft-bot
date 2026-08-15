@@ -1,12 +1,26 @@
 ﻿{
   "name": "minecraft-bot",
-  "version": "1.0.0",
-  "description": "A Minecraft bot built with mineflayer.",
-  "main": "bot.js",
+  "version": "0.2.0",
+  "private": true,
+  "description": "AI-driven Minecraft bot framework: lightweight desktop + server deployable.",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "start": "node bot.js"
+    "start": "node index.js",
+    "server": "node index.js",
+    "desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1",
+    "check": "node scripts/check.js"
   },
   "dependencies": {
-    "mineflayer": "^4.37.1"
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "minecraft-data": "^3.113.1",
+    "mineflayer": "^4.37.1",
+    "mineflayer-pathfinder": "^2.4.5",
+    "vec3": "^0.2.0",
+    "ws": "^8.21.3"
   }
 }

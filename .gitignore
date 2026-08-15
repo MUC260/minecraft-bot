@@ -1,4 +1,7 @@
 ﻿node_modules/
 config.json
+.env
 logs/
 *.log
+.DS_Store
+desktop/src-tauri/target/
