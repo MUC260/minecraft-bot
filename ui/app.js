@@ -29,6 +29,7 @@ const FIELD_LABELS = {
   'mc.pluginLoginCommands': '登录指令（例如 /login {password}，多个用 | 分隔）',
   'mc.pluginRegisterCommands': '首次注册指令（例如 /register {password} {password}，多个用 | 分隔）',
   'mc.pluginAuthDelayMs': '认证延迟(ms)',
+  'mc.aiCommands': '\u4E3B\u4EBA\u6307\u4EE4\u4EA4\u7ED9 AI \u51B3\u7B56\uFF08\u4E0D\u786C\u7F16\u7801\u780D\u6811/\u8DDF\u968F\u7B49\uFF09',
   'ai.enabled': '启用 AI',
   'ai.baseUrl': 'API 地址',
   'ai.apiKey': 'API Key',

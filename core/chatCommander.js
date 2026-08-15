@@ -48,6 +48,7 @@ class ChatCommander {
     this.config = config
     this.mc = (config && (config.mc || config)) || {}
     this.ownerNames = this._ownerNames(this.mc.ownerName)
+    this.aiCommands = this.mc.aiCommands !== false
     this.agent.on('chat', (item) => this.onChat(item))
   }
 
@@ -79,6 +80,12 @@ class ChatCommander {
 
 logger.info(`主人指令 ${item.username}: ${raw}`)
     this.agent.emit('log', { level: 'info', message: `主人指令 ${item.username}: ${raw}` })
+
+    if (this.aiCommands) {
+      this.brain.setGoal('\u4E3B\u4EBA\u6307\u4EE4\uFF1A' + raw)
+      if (this.brain.nudge) this.brain.nudge(80)
+      return
+    }
 
     if (parsed.action) {
       this.brain.setGoal(parsed.goal)
