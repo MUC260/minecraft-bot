@@ -16,7 +16,9 @@
                     "build:win":  "node scripts/build-exe.js",
                     "dist":  "node scripts/build-exe.js",
                     "build:exe":  "node scripts/build-exe.js",
-                    "test":  "node scripts/smoke.js"
+                    "test":  "node scripts/smoke.js",
+                    "build:gui":  "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-gui.ps1",
+                    "build:all":  "npm run build:exe \u0026\u0026 npm run build:gui"
                 },
     "dependencies":  {
                          "dotenv":  "^17.4.2",

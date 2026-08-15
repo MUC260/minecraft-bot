@@ -10,3 +10,6 @@ dist/
 .seatest/
 .pkg-cache/
 
+
+launcher/target/
+
