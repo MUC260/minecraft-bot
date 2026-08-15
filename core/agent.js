@@ -69,6 +69,7 @@ class BotAgent extends EventEmitter {
 
   _wire (bot) {
     bot.once('spawn', () => {
+      if (this.bot !== bot) return
       this.connected = true
       this._reconnectAttempts = 0
       try {
@@ -86,6 +87,7 @@ class BotAgent extends EventEmitter {
     })
 
     bot.on('chat', (username, message) => {
+      if (this.bot !== bot) return
       const item = { username, message, time: Date.now() }
       this.chatBuffer.push(item)
       if (this.chatBuffer.length > 100) this.chatBuffer.shift()
@@ -93,6 +95,7 @@ class BotAgent extends EventEmitter {
     })
 
     bot.on('kicked', (reason) => {
+      if (this.bot !== bot) return
       const text = String(reason)
       this.connected = false
       this._lastEndReason = text
@@ -102,6 +105,7 @@ class BotAgent extends EventEmitter {
     })
 
     bot.on('end', (reason) => {
+      if (this.bot !== bot) return
       const text = String(reason)
       this.connected = false
       this._lastEndReason = text
@@ -111,10 +115,12 @@ class BotAgent extends EventEmitter {
     })
 
     bot.on('error', (err) => {
+      if (this.bot !== bot) return
       logger.error('机器人错误:', err.message)
     })
 
     bot.on('death', () => {
+      if (this.bot !== bot) return
       this.emit('log', { level: 'warn', message: '角色死亡' })
     })
     bot.on('reactive:state', (t) => this.emit('reactiveState', t))
