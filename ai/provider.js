@@ -15,6 +15,20 @@
   return JSON.parse(text)
 }
 
+async function listModels ({ baseUrl, apiKey }) {
+  const url = String(baseUrl).replace(/\/+$/, '') + '/models'
+  const headers = {}
+  if (apiKey) headers.Authorization = 'Bearer ' + apiKey
+
+  const res = await fetch(url, { method: 'GET', headers })
+  const text = await res.text()
+  if (!res.ok) throw new Error(`AI API ${res.status}: ${text.slice(0, 400)}`)
+  const data = JSON.parse(text)
+  if (Array.isArray(data)) return data.map(m => (typeof m === 'string' ? m : m.id)).filter(Boolean)
+  if (Array.isArray(data.data)) return data.data.map(m => (typeof m === 'string' ? m : m.id)).filter(Boolean)
+  return []
+}
+
 function parseActions (data) {
   const message = data && data.choices && data.choices[0] && data.choices[0].message
   if (!message) return []
@@ -49,4 +63,4 @@ function parseActions (data) {
   return actions
 }
 
-module.exports = { chatCompletion, parseActions }
+module.exports = { chatCompletion, listModels, parseActions }

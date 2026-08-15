@@ -1,5 +1,6 @@
 ﻿const express = require('express')
 const logger = require('../lib/logger')
+const { listModels } = require('../ai/provider')
 
 module.exports = function createRouter (agent, brain, config) {
   const router = express.Router()
@@ -40,6 +41,19 @@ module.exports = function createRouter (agent, brain, config) {
     try {
       const saved = config.saveConfig ? config.saveConfig(req.body || {}) : (req.body || {})
       res.json({ ok: true, config: saved })
+    } catch (e) {
+      res.status(400).json({ ok: false, error: e.message })
+    }
+  })
+
+  router.post('/models', async (req, res) => {
+    try {
+      const body = req.body || {}
+      const baseUrl = String(body.baseUrl || config.ai.baseUrl || '').trim()
+      const apiKey = body.apiKey != null ? String(body.apiKey) : config.ai.apiKey
+      if (!baseUrl) throw new Error('请先填写 API 地址')
+      const models = await listModels({ baseUrl, apiKey })
+      res.json({ ok: true, models })
     } catch (e) {
       res.status(400).json({ ok: false, error: e.message })
     }

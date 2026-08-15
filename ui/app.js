@@ -91,6 +91,46 @@ function isSecret (path) {
   return path === 'ai.apiKey' || path === 'mc.password' || path === 'mc.pluginPassword'
 }
 
+async function fetchModels (event) {
+  const baseInput = document.querySelector('#configForm input[data-path="ai.baseUrl"]')
+  const keyInput = document.querySelector('#configForm input[data-path="ai.apiKey"]')
+  const baseUrl = baseInput ? baseInput.value.trim() : ''
+  const apiKey = keyInput ? keyInput.value.trim() : ''
+  const btn = event && event.currentTarget ? event.currentTarget : null
+  if (!baseUrl) {
+    $('configMsg').textContent = '\u8bf7\u5148\u586b\u5199 API \u5730\u5740'
+    $('configMsg').className = 'err'
+    return
+  }
+  if (btn) { btn.disabled = true; btn._oldText = btn.textContent; btn.textContent = '\u83b7\u53d6\u4e2d...' }
+  try {
+    const data = await api('/models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseUrl, apiKey })
+    })
+    const models = Array.isArray(data.models) ? data.models : []
+    const dl = document.getElementById('modelList')
+    if (dl) {
+      dl.innerHTML = ''
+      for (const m of models) {
+        const opt = document.createElement('option')
+        opt.value = m
+        dl.appendChild(opt)
+      }
+    }
+    $('configMsg').textContent = models.length
+      ? '\u83b7\u53d6\u5230 ' + models.length + '\u4e2a\u6a21\u578b\uff0c\u53ef\u5728\u6a21\u578b\u8f93\u5165\u6846\u4e2d\u9009\u62e9\uff1a' + models.slice(0, 8).join(', ') + (models.length > 8 ? '...' : '')
+      : '\u6ca1\u6709\u83b7\u53d6\u5230\u6a21\u578b'
+    $('configMsg').className = 'muted'
+  } catch (e) {
+    $('configMsg').textContent = '\u83b7\u53d6\u6a21\u578b\u5931\u8d25: ' + e.message
+    $('configMsg').className = 'err'
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = btn._oldText || '\u83b7\u53d6\u6a21\u578b' }
+  }
+}
+
 function renderConfig (config) {
   const form = $('configForm')
   form.innerHTML = ''
@@ -113,6 +153,34 @@ function renderConfig (config) {
       label.className = 'field'
       const text = document.createElement('span')
       text.textContent = FIELD_LABELS[path] || key
+
+      if (path === 'ai.model') {
+        const wrap = document.createElement('div')
+        wrap.className = 'field model-field'
+        wrap.appendChild(text)
+        const row = document.createElement('div')
+        row.className = 'model-row'
+        const input = document.createElement('input')
+        input.type = 'text'
+        input.value = value ?? ''
+        input.dataset.path = path
+        input.dataset.type = typeof value
+        input.setAttribute('list', 'modelList')
+        row.appendChild(input)
+        const btn = document.createElement('button')
+        btn.type = 'button'
+        btn.className = 'ghost'
+        btn.textContent = '\u83b7\u53d6\u6a21\u578b'
+        btn.onclick = fetchModels
+        row.appendChild(btn)
+        const dl = document.createElement('datalist')
+        dl.id = 'modelList'
+        wrap.appendChild(row)
+        wrap.appendChild(dl)
+        grid.appendChild(wrap)
+        continue
+      }
+
       label.appendChild(text)
 
       let input

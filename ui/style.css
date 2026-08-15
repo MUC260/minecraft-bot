@@ -121,3 +121,7 @@ pre {
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
 .field input { width: 100%; }
 .field input[type="checkbox"] { width: auto; align-self: flex-start; }
+
+.model-row { display: flex; gap: 8px; align-items: center; }
+.model-row input { flex: 1; min-width: 0; }
+.model-row button { flex-shrink: 0; }
