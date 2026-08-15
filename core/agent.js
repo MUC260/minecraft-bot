@@ -82,6 +82,33 @@ class BotAgent extends EventEmitter {
       this.emit('status', this.status())
     })
 
+    // 自动注册/登录：监听服务器系统消息，检测到 register/login 提示时自动响应
+    const BOT_PASSWORD = this.config.mc?.password || this.config.mc?.registerPassword || 'NyxPass2026!'
+    let registered = false
+    let loginSent = false
+    bot.on('message', (jsonMsg) => {
+      try {
+        const text = String(jsonMsg.toString() || '').toLowerCase()
+        // 注册提示
+        if (!registered && (text.includes('register') || text.includes('注册'))) {
+          registered = true
+          logger.info('检测到注册提示，自动发送 /register')
+          bot.chat(`/register ${BOT_PASSWORD} ${BOT_PASSWORD}`)
+          setTimeout(() => {
+            if (!loginSent) {
+              loginSent = true
+              logger.info('发送 /login')
+              bot.chat(`/login ${BOT_PASSWORD}`)
+            }
+          }, 1500)
+        } else if (!loginSent && (text.includes('login') || text.includes('登录') || text.includes('please login'))) {
+          loginSent = true
+          logger.info('检测到登录提示，自动发送 /login')
+          bot.chat(`/login ${BOT_PASSWORD}`)
+        }
+      } catch (e) {}
+    })
+
     bot.on('chat', (username, message) => {
       const item = { username, message, time: Date.now() }
       this.chatBuffer.push(item)

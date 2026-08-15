@@ -76,8 +76,16 @@ class Brain {
   }
 
   async tick () {
-    if (!this.running || this.ticking || !this.agent.connected) return
-    if (this.executor && this.executor.busy) return
+    if (process.env.DEBUG_AI) console.log('[BRAIN_TICK]', { running: this.running, ticking: this.ticking, connected: this.agent.connected, busy: this.executor && this.executor.busy })
+    if (!this.running || this.ticking || !this.agent.connected) {
+      // 未就绪时保持循环，等 bot 连接后再决策
+      this._scheduleNext()
+      return
+    }
+    if (this.executor && this.executor.busy) {
+      this._scheduleNext()
+      return
+    }
     this.ticking = true
     try {
       const snapshot = this.agent.snapshot()
