@@ -182,15 +182,17 @@ GUI 启动器会把核心静默释放到 `%LOCALAPPDATA%\minecraft-bot\core`，�
 
 ## API
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/status` | 连接/AI/生存/重连状态 |
-| GET | `/api/observations` | 当前观测 |
-| POST | `/api/actions` | 手动执行动作 `{name, args}` |
-| POST | `/api/ai/start` | 启动 AI 循环 |
-| POST | `/api/ai/stop` | 停止 AI 循环 |
-| POST | `/api/ai/goal` | 设置目标 `{goal}` |
-| POST | `/api/ai/tick` | 手动触发一次决策 |
+| GET | `/api/status` | connection / AI / survival / reconnect status |
+| GET | `/api/observations` | current observation snapshot |
+| POST | `/api/actions` | run an action `{name, args}` |
+| POST | `/api/bot/connect` | connect the bot to the Minecraft server |
+| POST | `/api/bot/disconnect` | disconnect the bot from the Minecraft server |
+| POST | `/api/ai/start` | start AI loop |
+| POST | `/api/ai/stop` | stop AI loop |
+| POST | `/api/ai/goal` | set goal `{goal}` |
+| POST | `/api/ai/tick` | trigger one AI decision |
 
 WebSocket：`/ws`，推送 `status`、`chat`、`observation`、`log`、`aiResult`。
 
