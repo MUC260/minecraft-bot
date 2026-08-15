@@ -78,6 +78,7 @@ class BotAgent extends EventEmitter {
       }
       this._schedulePluginAuth(bot)
       logger.info(`已生成 ${bot.username}`)
+      this.emit('log', { level: 'info', message: `已生成 ${bot.username}` })
       this.emit('spawn')
       this.emit('status', this.status())
     })
@@ -94,6 +95,7 @@ class BotAgent extends EventEmitter {
       this.connected = false
       this._lastEndReason = text
       logger.warn('被踢出:', text)
+      this.emit('log', { level: 'warn', message: `被踢出: ${text}` })
       this.emit('status', this.status(text))
       this._scheduleReconnect(text)
     })
@@ -103,6 +105,7 @@ class BotAgent extends EventEmitter {
       this.connected = false
       this._lastEndReason = text
       logger.warn('连接断开:', text)
+      this.emit('log', { level: 'warn', message: `连接断开: ${text}` })
       this.emit('status', this.status(text))
       this._scheduleReconnect(text)
     })
@@ -146,8 +149,10 @@ class BotAgent extends EventEmitter {
         const cmd = commands[i++]
         try { bot.chat(cmd) } catch (e) {
           logger.warn('插件服登录指令发送失败:', e.message)
+          this.emit('log', { level: 'error', message: `插件服登录指令发送失败: ${e.message}` })
         }
         logger.info(`插件服登录指令: ${cmd.split(password).join('***')}`)
+        this.emit('log', { level: 'info', message: `插件服登录指令: ${cmd.split(password).join('***')}` })
         setTimeout(sendNext, 600)
       }
       sendNext()

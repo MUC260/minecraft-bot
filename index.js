@@ -12,6 +12,8 @@ async function main () {
   const agent = new BotAgent(config).start()
   const brain = new Brain(agent, config.ai)
 
+  logger.on('log', (item) => agent.emit('log', item))
+
   agent.executor.on('skill:start', ({ call }) => {
     agent.emit('log', { level: 'info', message: `技能开始 ${call.name}` })
   })

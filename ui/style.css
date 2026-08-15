@@ -79,6 +79,7 @@ main {
 .card.wide { grid-column: span 2; }
 .card.full { grid-column: 1 / -1; }
 .card h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.card h2 button { font-size: 12px; padding: 4px 8px; margin-left: 8px; text-transform: none; }
 
 .mono { font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
 
@@ -87,6 +88,8 @@ main {
 .log .name { color: var(--accent2); }
 .log .err { color: var(--danger); }
 .log .warn { color: var(--warn); }
+
+.log-path { font-size: 12px; margin: -2px 0 8px; word-break: break-all; }
 
 .action-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .action-row input { flex: 1; min-width: 180px; }

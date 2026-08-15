@@ -1,4 +1,5 @@
 ﻿const express = require('express')
+const logger = require('../lib/logger')
 
 module.exports = function createRouter (agent, brain, config) {
   const router = express.Router()
@@ -10,6 +11,21 @@ module.exports = function createRouter (agent, brain, config) {
 
   router.get('/observations', (req, res) => {
     res.json(agent.snapshot())
+  })
+
+  router.get('/logs', (req, res) => {
+    try {
+      const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 300, 1), 2000)
+      const logs = logger.readTail(limit)
+      res.json({
+        ok: true,
+        logs,
+        path: logger.getPath(),
+        count: logs.length
+      })
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message })
+    }
   })
 
   router.get('/config', (req, res) => {

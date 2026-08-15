@@ -25,8 +25,8 @@ const FIELD_LABELS = {
   'mc.reconnectMaxAttempts': '最大重连次数(-1 无限)',
   'mc.reconnectAfterEmergencyLogout': '紧急下线后重连',
   'mc.pluginPassword': '插件服登录密码',
-  'mc.pluginLoginCommands': '登录指令（多个用 | 分隔）',
-  'mc.pluginRegisterCommands': '首次注册指令（无账号时才填，多个用 | 分隔）',
+  'mc.pluginLoginCommands': '登录指令（例如 /login {password}，多个用 | 分隔）',
+  'mc.pluginRegisterCommands': '首次注册指令（例如 /register {password} {password}，多个用 | 分隔）',
   'mc.pluginAuthDelayMs': '认证延迟(ms)',
   'ai.enabled': '启用 AI',
   'ai.baseUrl': 'API 地址',
@@ -133,6 +133,8 @@ function renderConfig (config) {
         input = document.createElement('input')
         input.type = 'text'
         input.value = value ?? ''
+        if (path === 'mc.pluginLoginCommands') input.placeholder = '/login {password}'
+        if (path === 'mc.pluginRegisterCommands') input.placeholder = '/register {password} {password}'
       }
 
       input.dataset.path = path
@@ -190,7 +192,7 @@ async function saveConfig () {
     })
     currentConfig = data.config || payload
     renderConfig(currentConfig)
-    $('configMsg').textContent = '已保存，重启程序后生效'
+    $('configMsg').textContent = '已保存。修改服务器/AI/插件服配置后，请关闭窗口重新打开以重新连接'
     $('configMsg').className = 'muted'
   } catch (e) {
     $('configMsg').textContent = '保存失败: ' + e.message
@@ -258,6 +260,18 @@ function addEvent (kind, item) {
   appendLog('event', item)
 }
 
+async function loadLogs () {
+  try {
+    const data = await api('/logs?limit=200')
+    const el = $('events')
+    el.innerHTML = ''
+    for (const item of data.logs) appendLog('event', item)
+    $('logPath').textContent = data.path ? `日志文件: ${data.path}` : '日志文件未启用'
+  } catch (e) {
+    $('logPath').textContent = '日志加载失败: ' + e.message
+  }
+}
+
 function appendLog (target, item) {
   const el = target === 'chat' ? $('chat') : $('events')
   const row = document.createElement('div')
@@ -314,10 +328,12 @@ $('sendAction').onclick = async () => {
 
 $('saveConfig').onclick = saveConfig
 $('reloadConfig').onclick = loadConfig
+$('reloadLogs').onclick = loadLogs
 
 ;(async function init () {
   connectWs()
   loadConfig()
+  loadLogs()
   try {
     renderStatus(await api('/status'))
     renderObs(await api('/observations'))
