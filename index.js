@@ -1,4 +1,4 @@
-const config = require('./lib/config')
+﻿const config = require('./lib/config')
 const logger = require('./lib/logger')
 const BotAgent = require('./core/agent')
 const Brain = require('./ai/brain')

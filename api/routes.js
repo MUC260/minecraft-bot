@@ -12,6 +12,23 @@ module.exports = function createRouter (agent, brain, config) {
     res.json(agent.snapshot())
   })
 
+  router.get('/config', (req, res) => {
+    try {
+      res.json(config.getConfig ? config.getConfig() : config)
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message })
+    }
+  })
+
+  router.put('/config', (req, res) => {
+    try {
+      const saved = config.saveConfig ? config.saveConfig(req.body || {}) : (req.body || {})
+      res.json({ ok: true, config: saved })
+    } catch (e) {
+      res.status(400).json({ ok: false, error: e.message })
+    }
+  })
+
   router.post('/actions', async (req, res) => {
     try {
       const result = await agent.runAction(req.body || {})

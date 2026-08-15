@@ -1,6 +1,200 @@
 ﻿const $ = (id) => document.getElementById(id)
 
 let ws = null
+let currentConfig = null
+
+const SECTION_LABELS = {
+  mc: 'Minecraft 连接',
+  ai: 'AI 模型',
+  api: '控制面板',
+  logging: '日志',
+  reactive: '生存 / 战斗',
+  executor: '执行器'
+}
+
+const FIELD_LABELS = {
+  'mc.host': '服务器地址',
+  'mc.port': '端口',
+  'mc.username': '机器人用户名',
+  'mc.password': '离线/微软密码（可选）',
+  'mc.auth': '认证模式',
+  'mc.version': '版本（留空自动）',
+  'mc.reconnect': '自动重连',
+  'mc.reconnectBaseDelayMs': '重连基础延迟(ms)',
+  'mc.reconnectMaxDelayMs': '重连最大延迟(ms)',
+  'mc.reconnectMaxAttempts': '最大重连次数(-1 无限)',
+  'mc.reconnectAfterEmergencyLogout': '紧急下线后重连',
+  'ai.enabled': '启用 AI',
+  'ai.baseUrl': 'API 地址',
+  'ai.apiKey': 'API Key',
+  'ai.model': '模型',
+  'ai.temperature': '温度',
+  'ai.maxTokens': '最大 Token',
+  'ai.intervalMs': '决策间隔(ms)',
+  'ai.planAhead': '规划前推',
+  'api.host': '监听地址',
+  'api.port': '面板端口',
+  'logging.file': '写日志文件',
+  'logging.dir': '日志目录',
+  'logging.name': '日志文件名',
+  'reactive.lowHealthFleeThreshold': '低血逃跑阈值',
+  'reactive.criticalHealthLogoutThreshold': '极低血下线阈值',
+  'reactive.hostileScanRadius': '敌对扫描半径',
+  'reactive.hostileExitRadius': '脱离敌对半径',
+  'reactive.hostileExitDebounceMs': '敌对脱战延迟(ms)',
+  'reactive.engageOverFlee': '优先迎战而非逃跑',
+  'reactive.requireShieldToEngage': '必须有盾才迎战',
+  'reactive.maxMeleeEngageThreatCount': '近战迎击最大敌人数量',
+  'reactive.minArmorScoreToEngage': '迎战最低护甲分',
+  'reactive.fleeRange': '逃跑目标距离',
+  'reactive.fleeMinThreatDistance': '逃跑最小威胁距离',
+  'reactive.fleeMinPathLength': '逃跑最小路径长度',
+  'reactive.fleeEscapeTestDistance': '逃生验证距离',
+  'reactive.fleeCloseRepathDistance': '近距离重规划距离',
+  'reactive.fleeCloseRepathMs': '近距离重规划间隔(ms)',
+  'reactive.fleeReplanThresholdBlocks': '重规划距离阈值(格)',
+  'reactive.maxInterruptionsPerTarget': '每个目标最大打断次数',
+  'reactive.resumeDebounceMs': '恢复任务间隔(ms)',
+  'reactive.autoEatStartAt': '自动进食饥饿阈值',
+  'reactive.reactiveConsumablesEnabled': '自动使用消耗品',
+  'reactive.meleeStrafeEnabled': '近战走位',
+  'reactive.meleeStrafeIntervalMs': '近战走位间隔(ms)',
+  'reactive.meleeAttackRange': '近战攻击距离',
+  'reactive.meleeAttackIntervalMs': '近战攻击间隔(ms)',
+  'reactive.defendWhenAttackedWindowMs': '受击防守窗口(ms)',
+  'reactive.defensiveAttackRange': '防守反击距离',
+  'executor.skillTimeoutMs': '技能超时(ms)',
+  'executor.resumeGateTimeoutMs': '恢复闸门超时(ms)'
+}
+
+function getPath (obj, path) {
+  return path.split('.').reduce((cur, key) => (cur == null ? cur : cur[key]), obj)
+}
+
+function setPath (obj, path, value) {
+  const keys = path.split('.')
+  const last = keys.pop()
+  const target = keys.reduce((cur, key) => {
+    if (cur[key] == null || typeof cur[key] !== 'object') cur[key] = {}
+    return cur[key]
+  }, obj)
+  target[last] = value
+}
+
+function isSecret (path) {
+  return path === 'ai.apiKey' || path === 'mc.password'
+}
+
+function renderConfig (config) {
+  const form = $('configForm')
+  form.innerHTML = ''
+  const order = ['mc', 'ai', 'api', 'logging', 'reactive', 'executor']
+
+  for (const section of order) {
+    const sectionObj = config[section] || {}
+    const h3 = document.createElement('h3')
+    h3.textContent = SECTION_LABELS[section] || section
+    form.appendChild(h3)
+
+    const grid = document.createElement('div')
+    grid.className = 'config-grid'
+    form.appendChild(grid)
+
+    for (const [key, value] of Object.entries(sectionObj)) {
+      if (value !== null && typeof value === 'object') continue
+      const path = `${section}.${key}`
+      const label = document.createElement('label')
+      label.className = 'field'
+      const text = document.createElement('span')
+      text.textContent = FIELD_LABELS[path] || key
+      label.appendChild(text)
+
+      let input
+      if (typeof value === 'boolean') {
+        input = document.createElement('input')
+        input.type = 'checkbox'
+        input.checked = !!value
+      } else if (typeof value === 'number') {
+        input = document.createElement('input')
+        input.type = 'number'
+        input.step = 'any'
+        input.value = value
+      } else if (isSecret(path)) {
+        input = document.createElement('input')
+        input.type = 'password'
+        input.value = ''
+        input.placeholder = value ? '已配置（留空保持不变）' : '未配置'
+        input.autocomplete = 'new-password'
+      } else {
+        input = document.createElement('input')
+        input.type = 'text'
+        input.value = value ?? ''
+      }
+
+      input.dataset.path = path
+      input.dataset.type = typeof value
+      label.appendChild(input)
+      grid.appendChild(label)
+    }
+  }
+}
+
+function collectConfig () {
+  if (!currentConfig) return {}
+  const next = JSON.parse(JSON.stringify(currentConfig))
+  const inputs = Array.from(document.querySelectorAll('#configForm input[data-path]'))
+  for (const input of inputs) {
+    const path = input.dataset.path
+    const type = input.dataset.type
+    let value
+    if (type === 'boolean') value = input.checked
+    else if (type === 'number') {
+      if (input.value.trim() === '') continue
+      const n = Number(input.value)
+      if (!Number.isFinite(n)) continue
+      value = n
+    } else {
+      value = input.value
+      if (isSecret(path) && value === '' && getPath(next, path)) continue
+    }
+    setPath(next, path, value)
+  }
+  return next
+}
+
+async function loadConfig () {
+  try {
+    currentConfig = await api('/config')
+    renderConfig(currentConfig)
+    $('configMsg').textContent = ''
+    $('configMsg').className = 'muted'
+  } catch (e) {
+    $('configMsg').textContent = '加载配置失败: ' + e.message
+    $('configMsg').className = 'err'
+  }
+}
+
+async function saveConfig () {
+  const btn = $('saveConfig')
+  btn.disabled = true
+  try {
+    const payload = collectConfig()
+    const data = await api('/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    currentConfig = data.config || payload
+    renderConfig(currentConfig)
+    $('configMsg').textContent = '已保存，重启程序后生效'
+    $('configMsg').className = 'muted'
+  } catch (e) {
+    $('configMsg').textContent = '保存失败: ' + e.message
+    $('configMsg').className = 'err'
+  } finally {
+    btn.disabled = false
+  }
+}
 
 function connectWs () {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -114,8 +308,12 @@ $('sendAction').onclick = async () => {
   }
 }
 
+$('saveConfig').onclick = saveConfig
+$('reloadConfig').onclick = loadConfig
+
 ;(async function init () {
   connectWs()
+  loadConfig()
   try {
     renderStatus(await api('/status'))
     renderObs(await api('/observations'))
