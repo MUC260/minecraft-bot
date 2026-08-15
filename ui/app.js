@@ -313,6 +313,25 @@ $('stopAi').onclick = async () => { await api('/ai/stop', { method: 'POST' }) }
 $('applyGoal').onclick = async () => {
   await api('/ai/goal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goal: $('goal').value }) })
 }
+$('connectBot').onclick = async () => {
+  try {
+    const data = await api('/bot/connect', { method: 'POST' })
+    if (data.status) renderStatus(data.status)
+    $('actionResult').textContent = '\u5df2\u6267\u884c'
+  } catch (e) {
+    $('actionResult').textContent = '\u8fdb\u5165\u670d\u52a1\u5668\u5931\u8d25: ' + e.message
+  }
+}
+$('disconnectBot').onclick = async () => {
+  try {
+    const data = await api('/bot/disconnect', { method: 'POST' })
+    if (data.status) renderStatus(data.status)
+    $('actionResult').textContent = '\u5df2\u6267\u884c'
+  } catch (e) {
+    $('actionResult').textContent = '\u9000\u51fa\u670d\u52a1\u5668\u5931\u8d25: ' + e.message
+  }
+}
+
 $('sendAction').onclick = async () => {
   let args = {}
   try { args = $('actionArgs').value.trim() ? JSON.parse($('actionArgs').value) : {} } catch {

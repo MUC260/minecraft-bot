@@ -24,10 +24,12 @@ class BotAgent extends EventEmitter {
     this._reconnectTimer = null
     this._reconnectAttempts = 0
     this._lastEndReason = ''
+    this._manualDisconnected = false
   }
 
   start () {
     this._stopping = false
+    this._manualDisconnected = false
     this._reconnectAttempts = 0
     this._createBot()
     return this
@@ -45,6 +47,7 @@ class BotAgent extends EventEmitter {
       version: c.version || undefined
     })
     this.bot = bot
+    bot.chatBuffer = this.chatBuffer
     bot.loadPlugin(pathfinder)
 
     this.pathfinderOwner = new PathfinderOwner(bot)
@@ -212,8 +215,7 @@ class BotAgent extends EventEmitter {
     return actions.execute(this.bot, action)
   }
 
-  stop () {
-    this._stopping = true
+  _clearCurrentBot () {
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer)
       this._reconnectTimer = null
@@ -221,16 +223,52 @@ class BotAgent extends EventEmitter {
     if (this.executor) {
       try { this.executor.clear() } catch {}
       try { this.executor.destroy() } catch {}
+      this.executor = null
     }
     if (this.reactive) {
       this.reactive.shuttingDown = true
-      this.reactive._releaseToken()
+      try { this.reactive._releaseToken() } catch {}
+      this.reactive = null
     }
     if (this.bot) {
-      try { this.bot.quit() } catch {}
+      const bot = this.bot
+      this.bot = null
+      try { bot.quit('manual-disconnect') } catch {}
     }
+    this.pathfinderOwner = null
+    this.movements = null
     this.connected = false
   }
+
+  disconnect (reason = 'manual-disconnect') {
+    if (this._stopping && !this.connected && !this.bot) return this.status(reason)
+    this._manualDisconnected = true
+    this._stopping = true
+    this._clearCurrentBot()
+    this._lastEndReason = reason
+    logger.info('\u624b\u52a8\u65ad\u5f00\u670d\u52a1\u5668')
+    this.emit('status', this.status(reason))
+    return this.status(reason)
+  }
+
+  connect () {
+    if (this.connected && this.bot) return this.status()
+    this._manualDisconnected = false
+    this._stopping = true
+    this._clearCurrentBot()
+    this._stopping = false
+    this._reconnectAttempts = 0
+    logger.info('\u624b\u52a8\u8fde\u63a5\u670d\u52a1\u5668')
+    this._createBot()
+    return this.status()
+  }
+
+  stop () {
+    this._stopping = true
+    this._manualDisconnected = true
+    this._clearCurrentBot()
+  }
+
 }
 
 module.exports = BotAgent

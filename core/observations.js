@@ -114,7 +114,7 @@ function build (bot, chatBuffer) {
     entities: entities.slice(0, 12).map(e => entityInfo(bot, e)),
     nearbyHostiles: hostiles.slice(0, 8).map(e => entityInfo(bot, e)),
     nearbyDrops: drops.slice(0, 8).map(e => entityInfo(bot, e)),
-    chat: chatBuffer.slice(-20),
+    chat: Array.isArray(chatBuffer) ? chatBuffer.slice(-20) : [],
     inventory: inventoryInfo(bot)
   }
 }

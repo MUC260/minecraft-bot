@@ -140,7 +140,36 @@ function mockBotForReactive () {
   Promise.resolve(result).then((text) => {
     assert.strictEqual(attacked, 0, 'protect must not attack while low health')
     assert(text.includes('???'), 'protect low-health result should mention following owner')
-    console.log('smoke: OK')
+    
+// 7. observations.build must tolerate missing chatBuffer (owner chat should not crash the core).
+{
+  const obs = require('../core/observations')
+  const bot = {
+    entity: { position: { x: 0, y: 64, z: 0 }, yaw: 0, pitch: 0, onGround: true, distanceTo () { return 0 } },
+    players: {},
+    entities: {},
+    inventory: { items () { return [] } },
+    username: 'Bot',
+    health: 20,
+    food: 20,
+    foodSaturation: 5,
+    game: { gameMode: 0, dimension: 'overworld' },
+    time: { timeOfDay: 1000 }
+  }
+  const out = obs.build(bot, undefined)
+  assert.strictEqual(out.connected, true)
+  assert.strictEqual(Array.isArray(out.chat), true)
+}
+
+// 8. BotAgent can be manually disconnected before a bot exists without throwing.
+{
+  const BotAgent = require('../core/agent')
+  const agent = new BotAgent({ mc: { host: '127.0.0.1', port: 25565, username: 'TestBot', auth: 'offline' }, reactive: {}, executor: {} })
+  const st = agent.disconnect('test-disconnect')
+  assert.strictEqual(st.connected, false)
+  assert.strictEqual(agent.connected, false)
+}
+console.log('smoke: OK')
   }).catch((err) => {
     console.error(err)
     process.exit(1)

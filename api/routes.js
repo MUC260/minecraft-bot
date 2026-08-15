@@ -54,6 +54,26 @@ module.exports = function createRouter (agent, brain, config) {
     }
   })
 
+  router.post('/bot/connect', (req, res) => {
+    try {
+      const status = agent.connect()
+      notify()
+      res.json({ ok: true, status })
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message })
+    }
+  })
+
+  router.post('/bot/disconnect', (req, res) => {
+    try {
+      const status = agent.disconnect('manual-disconnect')
+      notify()
+      res.json({ ok: true, status })
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message })
+    }
+  })
+
   router.post('/ai/start', (req, res) => {
     brain.start()
     notify()

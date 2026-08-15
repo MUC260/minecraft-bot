@@ -88,7 +88,7 @@ class SkillExecutor extends EventEmitter {
           controller
         )
       } catch (err) {
-        result = { ok: false, reason: `skill threw: ${err.message || err}`, state: observations.build(this.bot) }
+        result = { ok: false, reason: `skill threw: ${err.message || err}`, state: this._safeState() }
       } finally {
         this.pathfinderOwner?.unbindSkillSignal()
         this.currentController = null
@@ -119,12 +119,20 @@ class SkillExecutor extends EventEmitter {
     if (this.queue.length === 0 && !this.currentCall) this.emit('queue:empty', {})
   }
 
+  _safeState () {
+    try {
+      return observations.build(this.bot, this.bot && this.bot.chatBuffer ? this.bot.chatBuffer : [])
+    } catch {
+      return { connected: false, bot: null, players: [], entities: [], nearbyHostiles: [], nearbyDrops: [], chat: [], inventory: null }
+    }
+  }
+
   async _withTimeout (promise, timeoutMs, controller) {
     let timer
     const timeout = new Promise(resolve => {
       timer = setTimeout(() => {
         controller.abort('skill timed out')
-        resolve({ ok: false, reason: 'skill timed out', state: observations.build(this.bot) })
+        resolve({ ok: false, reason: 'skill timed out', state: this._safeState() })
       }, timeoutMs)
     })
     try {
