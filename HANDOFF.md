@@ -1,0 +1,173 @@
+﻿# 项目交接文档 / Handoff
+
+## 项目概览
+- 项目路径：`D:\minecraft-bot`
+- GitHub：`https://github.com/MUC260/minecraft-bot`（当前为公开仓库）
+- 协作者：`BCZZB`
+- 最新已推送提交：`9ccc124 fix: make collect autonomous and improve AI action planning`
+- 当前分支：`main`
+- 当前状态：本地 `git status` 干净，已通过 `npm run check` 和 `npm test`
+
+## 产品目标
+做一个轻量、可用的 Windows GUI 软件，让 AI 通过 API 接收游戏状态，并操作 Minecraft Java 版机器人。
+- 必须交付 GUI EXE，双击不弹黑色控制台。
+- 可部署到服务器跑核心程序。
+- AI 尽量自主决策，不写死大量规则。
+- 包体控制在 100MB 左右，避免几百 MB。
+
+## 已交付文件
+- GUI：`D:\minecraft-bot\dist\minecraft-bot-gui.exe`（约 97 MiB）
+- 核心可执行：`D:\minecraft-bot\dist\minecraft-bot.exe`（约 96 MiB）
+- 源码入口：`D:\minecraft-bot\index.js`
+
+## 核心架构
+- `index.js`：启动核心、日志、AI、聊天指令、API 服务。
+- `core/agent.js`：创建 Minecraft Bot、连接/重连、生命周期、状态快照。
+- `core/executor.js`：动作队列、技能超时、被生存系统抢占后的恢复。
+- `core/actions.js`：实际动作实现（采集、砍树、挖矿、移动、保护等）。
+- `core/observations.js`：把游戏状态转成 AI 可读 JSON。
+- `core/reactive.js`：低血量、敌对生物、危险环境等生存反应。
+- `core/pathfinderOwner.js`：统一管理寻路占用，生存系统优先级高于技能。
+- `core/chatCommander.js`：识别主人聊天指令并设定目标。
+- `ai/brain.js`：AI 决策循环。
+- `ai/provider.js`：调用 OpenAI 兼容 API、解析工具调用、获取模型列表。
+- `ai/tools.js`：AI function calling 工具定义。
+- `ai/prompts/system.md`：AI 系统提示词。
+- `ui/`：GUI 页面和交互逻辑。
+- `lib/config.js`：配置解析。
+- `scripts/`：构建、检查、冒烟测试脚本。
+
+## 最近一次修复重点
+提交 `9ccc124` 修复了用户反馈的主要问题：
+1. `bot.pathfinderOwner` 未挂到 bot 实例，导致采集/寻路技能报“pathfinderOwner 未初始化”。
+2. `collect` 无目标时只会找掉落物，找不到就失败，导致“让他采集就不动”。
+3. AI 看不到附近可采集方块，无法自主决策。
+4. `protect` 低血量路径读取 `bot.reactiveController` 的问题。
+5. 聊天重复发送。
+6. 部分日志和报错文案是乱码/问号。
+
+关键改动：
+- `core/agent.js`：`bot.pathfinderOwner = this.pathfinderOwner`
+- `core/actions.js`：
+  - 新增 `isCollectibleLike`
+  - 新增 `explore`
+  - 重写 `collect`，无目标时自动扫描并随机短距离探索
+  - 路径接近改为 `pathNearXZ`，避免垂直卡点
+  - chat 20 秒去重
+- `core/observations.js`：
+  - 新增 `isCollectibleBlock`
+  - 新增 `nearbyTargets`
+  - 快照中加入 `nearbyTargets`
+- `ai/tools.js`：新增 `explore`，更新 `collect` 描述
+- `ai/prompts/system.md`：强化自主推进、禁止空转、模糊指令直接调用采集
+
+## 已验证命令
+```powershell
+cd D:\minecraft-bot
+npm run check
+npm test
+```
+
+## 构建 EXE
+先关闭正在运行的程序，避免文件被占用：
+```powershell
+Get-Process | Where-Object { $_.ProcessName -like 'minecraft-bot*' -or $_.ProcessName -like 'electron*' } | Stop-Process -Force
+```
+
+构建核心 EXE：
+```powershell
+cd D:\minecraft-bot
+npm run build:exe
+```
+
+构建 GUI EXE：
+```powershell
+cd D:\minecraft-bot
+npm run build:gui
+```
+
+也可以：
+```powershell
+npm run build:all
+```
+
+## 推送 GitHub
+本机网络环境需要走固定 IP + Host 头绕过 DNS/证书问题：
+```powershell
+cd D:\minecraft-bot
+$credInput = "protocol=https`nhost=github.com`n`n"
+$cred = ($credInput | git credential fill 2>$null) | Out-String
+$user = [regex]::Match($cred, '(?m)^username=(.*)$').Groups[1].Value.Trim()
+$pass = [regex]::Match($cred, '(?m)^password=(.*)$').Groups[1].Value.Trim()
+$u = [uri]::EscapeDataString($user)
+$p = [uri]::EscapeDataString($pass)
+$url = "https://${u}:${p}@140.82.112.4/MUC260/minecraft-bot.git"
+git -c http.sslVerify=false -c http.extraHeader="Host: github.com" push $url HEAD:refs/heads/main
+```
+
+提交前先 `git status --short`，确保只提交源码。
+
+## 配置与敏感信息
+- 不要把 `config.json`、`.env`、`logs/`、`dist/` 提交到仓库。
+- 不要把真实 API Key、密码、服务器密码提交上去。
+- 如果仓库历史里已经混入敏感信息，下一步应处理。
+- 用户要求把能配置的东西尽量做进 GUI，减少手改文件。
+
+## 日志与调试
+- 日志文件：`D:\minecraft-bot\logs\agent.log`
+- GUI 也显示技能开始/完成/失败、AI 决策失败、连接状态等日志。
+- 调试时先看日志，按“连接失败 / AI 决策失败 / 技能失败 / 寻路失败 / 被生存系统抢占 / 超时”分类定位。
+- 常用日志关键字：
+  - `AI 决策失败`
+  - `技能失败`
+  - `pathfinder`
+  - `reactive`
+  - `无法到达`
+  - `timeout`
+  - `noPath`
+
+## 用户关注点与后续待办
+1. AI 目前还不够“聪明”，后续重点优化：
+   - 给 AI 更完整的背包/目标/历史动作上下文。
+   - 考虑多轮规划，而不是每轮零散动作。
+   - 增加“目标拆解”，例如砍树后主动捡掉落物。
+2. 技能稳定性仍要观察：
+   - `collect` 现在会自动探索，但要确认寻路不会卡住或长时间超时。
+   - `chopTree` / `mineOreVein` 目前会挖最多一定数量，可能还没捡掉落物就停。
+   - `protect` 需要重点实测低血量场景。
+3. 插件服登录：
+   - 配置里已有插件服登录指令相关字段，需确认 GUI 中是否完全暴露。
+4. 版本兼容：
+   - 当前保留并裁剪了大量 Minecraft Java 版本数据，构建输出提示 1.8.8 到 1.21.11。
+   - 实际是否能进所有版本，还需要按目标服务器版本继续测试。
+5. 紧急低血下线：
+   - 现有设计是低血且确认能跑才跑；无法确认逃跑路径时不会乱跑，也不会轻易退出服务器。
+   - 如果用户还遇到“protect 后退出服务器”，先看日志里是 `reactive` 抢占、`critical-health` 还是连接被服务器踢出。
+6. GUI 体验：
+   - 用户希望打开后不弹黑窗，已满足。
+   - 下一步可以继续改进设置界面、日志显示、手动连接/断开按钮。
+
+## 下次继续做事的建议顺序
+1. 先跑：
+```powershell
+cd D:\minecraft-bot
+git pull
+npm run check
+npm test
+```
+2. 读 `HANDOFF.md` 和 `logs/agent.log`。
+3. 让用户提供最新日志，先定位是哪种失败，再改对应模块。
+4. 改完源码后：
+```powershell
+npm run check
+npm test
+git add <只加源码>
+git commit -m "fix: ..."
+# 使用上面的 GitHub 推送命令
+npm run build:exe
+npm run build:gui
+```
+5. 告诉用户重启：
+```text
+D:\minecraft-bot\dist\minecraft-bot-gui.exe
+```
