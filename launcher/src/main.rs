@@ -1,4 +1,4 @@
-﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::env;
 use std::fs;
@@ -29,14 +29,42 @@ fn core_dir() -> PathBuf {
     base.join("minecraft-bot").join("core")
 }
 
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn hash_file(path: &Path) -> std::io::Result<u64> {
+    let mut file = fs::File::open(path)?;
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        for &b in &buf[..n] {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    Ok(hash)
+}
+
 fn ensure_core() -> std::io::Result<PathBuf> {
     let dir = core_dir();
     fs::create_dir_all(&dir)?;
     let exe = dir.join(CORE_NAME);
-    let size_matches = fs::metadata(&exe)
+    let expected_hash = fnv1a64(CORE_BYTES);
+    let already_current = fs::metadata(&exe)
         .map(|m| m.len() == CORE_BYTES.len() as u64)
-        .unwrap_or(false);
-    if !size_matches {
+        .unwrap_or(false)
+        && hash_file(&exe).map(|h| h == expected_hash).unwrap_or(false);
+    if !already_current {
         fs::write(&exe, CORE_BYTES)?;
     }
     Ok(exe)
