@@ -135,6 +135,15 @@ function isOreLike (block) {
   return n.endsWith('_ore') || n === 'ancient_debris'
 }
 
+function isCollectibleLike (block) {
+  const n = lowerBlockName(block)
+  if (!n) return false
+  if (n.endsWith('_log') || n.endsWith('_ore') || n === 'ancient_debris') return true
+  if (n === 'pumpkin' || n === 'melon' || n === 'sugar_cane' || n === 'cactus' || n === 'bamboo') return true
+  if (n === 'wheat' || n === 'carrots' || n === 'potatoes' || n === 'beetroots' || n === 'nether_wart' || n === 'cocoa' || n === 'sweet_berry_bush') return true
+  return false
+}
+
 function findNearestBlockBy (bot, predicate, radius = 12, count = 128) {
   if (!bot.findBlocks || !bot.entity) return null
   let positions = []
@@ -314,7 +323,7 @@ function waitForGoal (bot, ctx, timeoutMs = 60000) {
 }
 
 async function pathNearXZ (bot, ctx, x, z, range = 2.5, timeoutMs = 60000) {
-  if (!bot.pathfinder) throw new Error('pathfinder ???')
+  if (!bot.pathfinder) throw new Error('pathfinder 未加载')
   const acquired = acquirePathfinder(bot, ctx, 'navigate-xz')
   if (!acquired.ok) return acquired
   const acq = acquired.acq
@@ -323,10 +332,10 @@ async function pathNearXZ (bot, ctx, x, z, range = 2.5, timeoutMs = 60000) {
     const installed = setPathfinderGoal(bot, acq, goal)
     if (!installed.ok) return { ok: false, reason: installed.reason }
     const r = await waitForGoal(bot, ctx, timeoutMs)
-    if (r.kind === 'preempted') return { preempted: true, reason: 'reactive ????' }
+    if (r.kind === 'preempted') return { preempted: true, reason: 'reactive 抢占路径' }
     if (r.kind === 'reached') return { ok: true }
-    if (r.kind === 'noPath' || r.kind === 'timeout') throw new Error('????: ' + r.kind)
-    throw new Error('?????: ' + r.kind)
+    if (r.kind === 'noPath' || r.kind === 'timeout') throw new Error('寻路失败: ' + r.kind)
+    throw new Error('寻路未完成: ' + r.kind)
   } finally {
     acq.release()
   }
@@ -354,9 +363,13 @@ async function pathNear (bot, ctx, x, y, z, range = 1, timeoutMs = 60000) {
 const handlers = {
   chat: async (bot, args) => {
     const message = String(args.message || '').slice(0, 100)
-    if (!message) throw new Error('chat 需要 message')
+    if (!message) throw new Error('chat \u9700\u8981 message')
+    const now = Date.now()
+    bot._chatDedupe = bot._chatDedupe || {}
+    if (now - (bot._chatDedupe[message] || 0) < 20000) return '\u5df2\u5ffd\u7565\u91cd\u590d\u804a\u5929'
+    bot._chatDedupe[message] = now
     bot.chat(message)
-    return `已发送聊天: ${message}`
+    return '\u5df2\u53d1\u9001\u804a\u5929: ' + message
   },
 
   look: async (bot, args) => {
@@ -396,7 +409,28 @@ const handlers = {
     bot.setControlState('jump', true)
     await sleep(250)
     bot.setControlState('jump', false)
-    return '跳跃'
+    return '\u8df3\u8dc3'
+  },
+
+  explore: async (bot, args, ctx) => {
+    if (!bot.pathfinder) throw new Error('pathfinder \u672a\u52a0\u8f7d')
+    const distance = Math.max(3, Math.min(Number(args.distance ?? 8), 24))
+    const dir = String(args.direction || '').toLowerCase()
+    let x
+    let z
+    if (dir === 'north') { x = bot.entity.position.x; z = bot.entity.position.z - distance }
+    else if (dir === 'south') { x = bot.entity.position.x; z = bot.entity.position.z + distance }
+    else if (dir === 'east') { x = bot.entity.position.x + distance; z = bot.entity.position.z }
+    else if (dir === 'west') { x = bot.entity.position.x - distance; z = bot.entity.position.z }
+    else {
+      const angle = Math.random() * Math.PI * 2
+      x = bot.entity.position.x + Math.sin(angle) * distance
+      z = bot.entity.position.z + Math.cos(angle) * distance
+    }
+    const nav = await pathNearXZ(bot, ctx, x, z, 2, 45000)
+    if (nav && nav.preempted) return nav
+    if (nav && !nav.ok) throw new Error(nav.reason || '\u65e0\u6cd5\u63a2\u7d22')
+    return '\u5df2\u63a2\u7d22\u81f3 ' + Math.floor(x) + ',' + Math.floor(z)
   },
 
   attack: async (bot, args) => {
@@ -471,6 +505,7 @@ const handlers = {
     const hasPos = [x, y, z].every(Number.isFinite)
     let block = null
     let itemDrop = null
+    const radius = Math.max(4, Math.min(Number(args.radius ?? 12), 24))
 
     if (hasPos) {
       block = bot.blockAt(new Vec3(x, y, z))
@@ -478,38 +513,49 @@ const handlers = {
         itemDrop = nearestItemDrop(bot, 4)
       }
     } else {
-      block = findNearestBlock(bot, args)
-      if (!block) itemDrop = nearestItemDrop(bot, Math.min(Number(args.radius ?? 12), 24))
+      const name = String(args.name || '').toLowerCase()
+      block = name ? findNearestBlock(bot, { ...args, name }) : findNearestBlockBy(bot, isCollectibleLike, radius, 128)
+      if (!block) itemDrop = nearestItemDrop(bot, radius)
     }
 
-    if (!block && !itemDrop) throw new Error('附近没有可采集的方块或掉落物')
+    if (!block && !itemDrop) {
+      const angle = Math.random() * Math.PI * 2
+      const distance = Math.max(3, Math.min(Number(args.moveDistance ?? 6), 16))
+      const tx = bot.entity.position.x + Math.sin(angle) * distance
+      const tz = bot.entity.position.z + Math.cos(angle) * distance
+      const nav = await pathNearXZ(bot, ctx, tx, tz, 2, 40000)
+      if (nav && nav.preempted) return nav
+      if (nav && !nav.ok) throw new Error(nav.reason || '\u65e0\u6cd5\u79fb\u52a8\u63a2\u7d22')
+      return '\u9644\u8fd1\u6682\u65f6\u6ca1\u6709\u53ef\u91c7\u96c6\u76ee\u6807\uff0c\u5df2\u79fb\u52a8\u63a2\u7d22'
+    }
+
     if (block) {
       const dist = bot.entity.position.distanceTo(block.position)
       if (dist > 3.5) {
-        const nav = await pathNear(bot, ctx, block.position.x, block.position.y, block.position.z, 1.5, 45000)
+        const nav = await pathNearXZ(bot, ctx, block.position.x, block.position.z, 2.5, 45000)
         if (nav && nav.preempted) return nav
-        if (nav && !nav.ok) throw new Error(nav.reason || '无法到达目标方块')
+        if (nav && !nav.ok) throw new Error(nav.reason || '\u65e0\u6cd5\u5230\u8fbe\u76ee\u6807\u65b9\u5757')
       }
       await raceWithAbort(bot.dig(block, true), ctx, () => {
         if (typeof bot.stopDigging === 'function') bot.stopDigging()
       })
-      return `采集 ${block.name}`
+      return '\u91c7\u96c6 ' + block.name
     }
 
     const drop = itemDrop
     if (drop.distance > 2.5) {
-      const nav = await pathNear(bot, ctx, drop.entity.position.x, drop.entity.position.y, drop.entity.position.z, 1, 45000)
+      const nav = await pathNearXZ(bot, ctx, drop.entity.position.x, drop.entity.position.z, 1.5, 45000)
       if (nav && nav.preempted) return nav
-      if (nav && !nav.ok) throw new Error(nav.reason || '无法到达掉落物')
+      if (nav && !nav.ok) throw new Error(nav.reason || '\u65e0\u6cd5\u5230\u8fbe\u6389\u843d\u7269')
     }
     const id = drop.entity.id
     for (let i = 0; i < 60; i++) {
       throwIfAborted(ctx)
       await sleep(100, ctx)
       const stillThere = Object.values(bot.entities || {}).some(e => e && e.id === id)
-      if (!stillThere) return '拾取掉落物'
+      if (!stillThere) return '\u62fe\u53d6\u6389\u843d\u7269'
     }
-    return '已靠近掉落物'
+    return '\u5df2\u9760\u8fd1\u6389\u843d\u7269'
   },
 
   chopTree: async (bot, args, ctx) => {
@@ -559,9 +605,9 @@ const handlers = {
 
   protect: async (bot, args, ctx) => {
     const username = String(args.username || '').trim()
-    if (!username) throw new Error('protect ?? username ??')
+    if (!username) throw new Error('protect 需要 username')
     const player = bot.players && bot.players[username]
-    if (!player || !player.entity) throw new Error('?????: ' + username)
+    if (!player || !player.entity) throw new Error('找不到玩家: ' + username)
     const radius = Math.max(4, Math.min(Number(args.radius ?? 12), 32))
     const reactiveCfg = (bot.reactiveController && bot.reactiveController.cfg) || {}
     const lowHealthThreshold = Number(reactiveCfg.lowHealthFleeThreshold ?? 8)
@@ -571,9 +617,9 @@ const handlers = {
       if (dist > 3) {
         const nav = await pathNear(bot, ctx, player.entity.position.x, player.entity.position.y, player.entity.position.z, 3, 30000)
         if (nav && nav.preempted) return nav
-        if (nav && !nav.ok) throw new Error(nav.reason || '??????')
+        if (nav && !nav.ok) throw new Error(nav.reason || '无法接近目标')
       }
-      return `?????${bot.health}????? ${username}???????`
+      return `低血量 ${bot.health}，优先保命并跟随 ${username}`
     }
     const threat = findNearestHostile(bot, radius)
     if (threat) {

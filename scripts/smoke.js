@@ -139,7 +139,7 @@ function mockBotForReactive () {
   const result = actions.handlers.protect(bot, { username: 'Steve', radius: 12 }, {})
   Promise.resolve(result).then((text) => {
     assert.strictEqual(attacked, 0, 'protect must not attack while low health')
-    assert(text.includes('???'), 'protect low-health result should mention following owner')
+    assert(text.includes('低血'), 'protect low-health result should mention following owner')
     
 // 7. observations.build must tolerate missing chatBuffer (owner chat should not crash the core).
 {

@@ -51,6 +51,7 @@ class BotAgent extends EventEmitter {
     bot.loadPlugin(pathfinder)
 
     this.pathfinderOwner = new PathfinderOwner(bot)
+    bot.pathfinderOwner = this.pathfinderOwner
     this.executor = new SkillExecutor(bot, {
       pathfinderOwner: this.pathfinderOwner,
       skillTimeoutMs: this.config.executor?.skillTimeoutMs ?? 120000,

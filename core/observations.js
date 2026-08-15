@@ -87,6 +87,50 @@ function inventoryInfo (bot) {
   }
 }
 
+function lowerName (block) {
+  return String(block && block.name ? block.name : '').toLowerCase()
+}
+
+function isCollectibleBlock (block) {
+  const n = lowerName(block)
+  if (!n) return false
+  if (n.endsWith('_log') || n.endsWith('_ore') || n === 'ancient_debris') return true
+  if (n === 'pumpkin' || n === 'melon' || n === 'sugar_cane' || n === 'cactus' || n === 'bamboo') return true
+  if (n === 'wheat' || n === 'carrots' || n === 'potatoes' || n === 'beetroots' || n === 'nether_wart' || n === 'cocoa' || n === 'sweet_berry_bush') return true
+  return false
+}
+
+function nearbyTargets (bot, radius = 16, count = 20) {
+  if (!bot || !bot.entity || !bot.findBlocks) return []
+  let positions = []
+  try {
+    positions = bot.findBlocks({
+      matching: block => {
+        try { return isCollectibleBlock(block) } catch { return false }
+      },
+      maxDistance: radius,
+      count
+    })
+  } catch {
+    return []
+  }
+  const out = []
+  for (const pos of positions || []) {
+    const block = bot.blockAt(pos)
+    if (!block) continue
+    const distance = bot.entity.position.distanceTo(block.position)
+    out.push({
+      name: block.name,
+      displayName: block.displayName || block.name,
+      position: vec(block.position),
+      relative: relativeOffset(bot, { position: block.position }),
+      distance: distance ? round(distance) : null
+    })
+  }
+  out.sort((a, b) => (a.distance ?? 999) - (b.distance ?? 999))
+  return out.slice(0, count)
+}
+
 function build (bot, chatBuffer) {
   if (!bot || !bot.entity) {
     return { connected: false, bot: null, players: [], entities: [], nearbyHostiles: [], nearbyDrops: [], chat: [], inventory: null }
@@ -114,6 +158,7 @@ function build (bot, chatBuffer) {
     entities: entities.slice(0, 12).map(e => entityInfo(bot, e)),
     nearbyHostiles: hostiles.slice(0, 8).map(e => entityInfo(bot, e)),
     nearbyDrops: drops.slice(0, 8).map(e => entityInfo(bot, e)),
+    nearbyTargets: nearbyTargets(bot),
     chat: Array.isArray(chatBuffer)
       ? chatBuffer
           .filter(item => !item || !item.handled)

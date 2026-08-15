@@ -484,7 +484,7 @@ class ReactiveController {
       }
       this.bot.emit('reactive:log', { level: 'warn', message: `low-health-no-escape: staying to fight (${threat.entity.name} ${round(threat.distance)}m)` })
       if (this.bot.health > 0 && this.bot.health <= (this.cfg.criticalHealthLogoutThreshold ?? 4)) {
-        this.bot.emit('reactive:log', { level: 'warn', message: `critical-health-no-escape: ????????????????? (health=${this.bot.health})` })
+        this.bot.emit('reactive:log', { level: 'warn', message: `critical-health-no-escape: 极低血量且无逃跑路径，选择原地战斗 (health=${this.bot.health})` })
       }
       this._prepareCombatLoadout(now)
       this._defensiveCombat(threat, now)
