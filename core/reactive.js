@@ -484,14 +484,7 @@ class ReactiveController {
       }
       this.bot.emit('reactive:log', { level: 'warn', message: `low-health-no-escape: staying to fight (${threat.entity.name} ${round(threat.distance)}m)` })
       if (this.bot.health > 0 && this.bot.health <= (this.cfg.criticalHealthLogoutThreshold ?? 4)) {
-        if (!this.shuttingDown) {
-          this._transition(STATE.EMERGENCY, 'critical-health-no-escape', { health: this.bot.health })
-          this._ensureToken('EMERGENCY')
-          this.bot.emit('reactive:emergency-logout', { health: this.bot.health, reason: 'critical-health-no-escape' })
-          try { this.bot.quit('emergency:critical-health') } catch {}
-          this.shuttingDown = true
-        }
-        return
+        this.bot.emit('reactive:log', { level: 'warn', message: `critical-health-no-escape: ????????????????? (health=${this.bot.health})` })
       }
       this._prepareCombatLoadout(now)
       this._defensiveCombat(threat, now)

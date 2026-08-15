@@ -540,10 +540,22 @@ const handlers = {
 
   protect: async (bot, args, ctx) => {
     const username = String(args.username || '').trim()
-    if (!username) throw new Error('protect 需要 username 参数')
+    if (!username) throw new Error('protect ?? username ??')
     const player = bot.players && bot.players[username]
-    if (!player || !player.entity) throw new Error('找不到玩家: ' + username)
+    if (!player || !player.entity) throw new Error('?????: ' + username)
     const radius = Math.max(4, Math.min(Number(args.radius ?? 12), 32))
+    const reactiveCfg = (bot.reactiveController && bot.reactiveController.cfg) || {}
+    const lowHealthThreshold = Number(reactiveCfg.lowHealthFleeThreshold ?? 8)
+    const lowHealth = Number.isFinite(bot.health) && bot.health <= lowHealthThreshold
+    if (lowHealth) {
+      const dist = bot.entity.position.distanceTo(player.entity.position)
+      if (dist > 3) {
+        const nav = await pathNear(bot, ctx, player.entity.position.x, player.entity.position.y, player.entity.position.z, 3, 30000)
+        if (nav && nav.preempted) return nav
+        if (nav && !nav.ok) throw new Error(nav.reason || '??????')
+      }
+      return `?????${bot.health}????? ${username}???????`
+    }
     const threat = findNearestHostile(bot, radius)
     if (threat) {
       const target = threat.entity
