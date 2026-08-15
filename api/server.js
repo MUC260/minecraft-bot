@@ -9,7 +9,7 @@ function start (agent, brain, config) {
   const app = express()
   app.use(express.json())
   app.use('/api', createRouter(agent, brain, config))
-  app.use(express.static(path.join(__dirname, '..', 'ui')))
+  app.use(express.static(config.uiDir))
 
   const server = http.createServer(app)
   const wss = new WebSocketServer({ server, path: '/ws' })

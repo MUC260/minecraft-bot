@@ -5,3 +5,8 @@ logs/
 *.log
 .DS_Store
 desktop/src-tauri/target/
+
+dist/
+.seatest/
+.pkg-cache/
+
