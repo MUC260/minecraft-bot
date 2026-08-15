@@ -74,7 +74,10 @@ class ChatCommander {
     const parsed = this.parse(raw, item.username)
     if (!parsed) return
 
-    logger.info(`主人指令 ${item.username}: ${raw}`)
+        // Only let the AI react to each owner chat line once.
+    item.handled = true
+
+logger.info(`主人指令 ${item.username}: ${raw}`)
     this.agent.emit('log', { level: 'info', message: `主人指令 ${item.username}: ${raw}` })
 
     if (parsed.action) {

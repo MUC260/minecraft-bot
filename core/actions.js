@@ -212,7 +212,7 @@ async function digConnected (bot, start, predicate, ctx, limit = 64) {
 
     const dist = bot.entity.position.distanceTo(block.position)
     if (dist > 3.5) {
-      const nav = await pathNear(bot, ctx, block.position.x, block.position.y, block.position.z, 1.8, 45000)
+      const nav = await pathNearXZ(bot, ctx, block.position.x, block.position.z, 2.5, 45000)
       if (nav && nav.preempted) return { preempted: true, reason: nav.reason || 'reactive preempt' }
       if (nav && !nav.ok) throw new Error(nav.reason || 'unable to reach target block')
     }
@@ -311,6 +311,25 @@ function waitForGoal (bot, ctx, timeoutMs = 60000) {
     }
     timer = setTimeout(() => finish('timeout'), timeoutMs)
   })
+}
+
+async function pathNearXZ (bot, ctx, x, z, range = 2.5, timeoutMs = 60000) {
+  if (!bot.pathfinder) throw new Error('pathfinder ???')
+  const acquired = acquirePathfinder(bot, ctx, 'navigate-xz')
+  if (!acquired.ok) return acquired
+  const acq = acquired.acq
+  try {
+    const goal = new goals.GoalNearXZ(x, z, range)
+    const installed = setPathfinderGoal(bot, acq, goal)
+    if (!installed.ok) return { ok: false, reason: installed.reason }
+    const r = await waitForGoal(bot, ctx, timeoutMs)
+    if (r.kind === 'preempted') return { preempted: true, reason: 'reactive ????' }
+    if (r.kind === 'reached') return { ok: true }
+    if (r.kind === 'noPath' || r.kind === 'timeout') throw new Error('????: ' + r.kind)
+    throw new Error('?????: ' + r.kind)
+  } finally {
+    acq.release()
+  }
 }
 
 async function pathNear (bot, ctx, x, y, z, range = 1, timeoutMs = 60000) {
