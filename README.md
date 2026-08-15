@@ -1,4 +1,4 @@
-﻿# Minecraft AI Bot
+# Minecraft AI Bot
 
 AI 驱动的 Minecraft 机器人。核心思路：**机器人观察游戏状态 → 通过 API 交给 AI → AI 返回动作 → 机器人执行**。
 
@@ -95,7 +95,12 @@ GUI 启动器会把核心静默释放到 `%LOCALAPPDATA%\minecraft-bot\core`，�
 | `mc.host` / `mc.port` | Minecraft 服务器地址和端口 |
 | `mc.username` | 机器人名字 |
 | `mc.auth` | `offline`（离线服）或 `microsoft` |
+| `mc.version` | 版本，留空自动识别 |
 | `mc.password` | 正版账号密码，离线留空 |
+| `mc.pluginPassword` | 插件服登录密码（AuthMe/nLogin 等） |
+| `mc.pluginLoginCommands` | 登录指令，{password} 会被替换成密码，多个用 \| 分隔 |
+| `mc.pluginRegisterCommands` | 首次注册指令，无账号时才填 |
+| `mc.pluginAuthDelayMs` | 进入服务器后延迟多少 ms 发送认证指令 |
 | `mc.reconnect` | 断线后是否自动重连，默认 `true` |
 | `mc.reconnectBaseDelayMs` | 重连基础延迟，默认 `3000` |
 | `mc.reconnectMaxDelayMs` | 重连最大延迟，默认 `60000` |

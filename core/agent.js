@@ -1,4 +1,4 @@
-﻿const EventEmitter = require('events')
+const EventEmitter = require('events')
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
 const observations = require('./observations')
@@ -76,6 +76,7 @@ class BotAgent extends EventEmitter {
       } catch (e) {
         logger.warn('pathfinder 初始化失败:', e.message)
       }
+      this._schedulePluginAuth(bot)
       logger.info(`已生成 ${bot.username}`)
       this.emit('spawn')
       this.emit('status', this.status())
@@ -116,6 +117,41 @@ class BotAgent extends EventEmitter {
     })
     bot.on('reactive:state', (t) => this.emit('reactiveState', t))
     bot.on('reactive:log', (item) => this.emit('log', item))
+  }
+
+  _schedulePluginAuth (bot) {
+    const c = this.mc
+    const password = String(c.pluginPassword || '')
+    if (!password) return
+    const delay = Math.max(0, Number(c.pluginAuthDelayMs !== undefined ? c.pluginAuthDelayMs : 1500))
+    setTimeout(() => {
+      if (this._stopping || this.bot !== bot || !bot.chat) return
+      const username = String(bot.username || c.username || '')
+      const expand = (text) => String(text || '')
+        .split('{password}').join(password)
+        .split('{username}').join(username)
+      const register = String(c.pluginRegisterCommands || '')
+      const login = String(c.pluginLoginCommands || '')
+      const commands = []
+      for (const source of [register, login]) {
+        for (const item of String(source).split('|')) {
+          const cmd = item.trim()
+          if (cmd) commands.push(expand(cmd))
+        }
+      }
+      let i = 0
+      const sendNext = () => {
+        if (this._stopping || this.bot !== bot) return
+        if (i >= commands.length) return
+        const cmd = commands[i++]
+        try { bot.chat(cmd) } catch (e) {
+          logger.warn('插件服登录指令发送失败:', e.message)
+        }
+        logger.info(`插件服登录指令: ${cmd.split(password).join('***')}`)
+        setTimeout(sendNext, 600)
+      }
+      sendNext()
+    }, delay)
   }
 
   _scheduleReconnect (reason) {

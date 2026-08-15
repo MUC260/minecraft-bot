@@ -1,4 +1,4 @@
-﻿const $ = (id) => document.getElementById(id)
+const $ = (id) => document.getElementById(id)
 
 let ws = null
 let currentConfig = null
@@ -24,6 +24,10 @@ const FIELD_LABELS = {
   'mc.reconnectMaxDelayMs': '重连最大延迟(ms)',
   'mc.reconnectMaxAttempts': '最大重连次数(-1 无限)',
   'mc.reconnectAfterEmergencyLogout': '紧急下线后重连',
+  'mc.pluginPassword': '插件服登录密码',
+  'mc.pluginLoginCommands': '登录指令（多个用 | 分隔）',
+  'mc.pluginRegisterCommands': '首次注册指令（无账号时才填，多个用 | 分隔）',
+  'mc.pluginAuthDelayMs': '认证延迟(ms)',
   'ai.enabled': '启用 AI',
   'ai.baseUrl': 'API 地址',
   'ai.apiKey': 'API Key',
@@ -82,7 +86,7 @@ function setPath (obj, path, value) {
 }
 
 function isSecret (path) {
-  return path === 'ai.apiKey' || path === 'mc.password'
+  return path === 'ai.apiKey' || path === 'mc.password' || path === 'mc.pluginPassword'
 }
 
 function renderConfig (config) {

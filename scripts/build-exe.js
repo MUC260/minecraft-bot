@@ -1,4 +1,4 @@
-﻿const fs = require('fs')
+const fs = require('fs')
 const path = require('path')
 const { spawnSync } = require('child_process')
 
@@ -50,8 +50,6 @@ function writeTrimmedDataJs (versions) {
   const original = fs.readFileSync(BACKUP_JS, 'utf8')
   const lines = original.split(/\r?\n/)
   const blocks = readVersionBlocks(original)
-  const wanted = new Set(versions)
-
   // Extract only the pc section. Bedrock is intentionally left empty:
   // mineflayer is a Java Edition bot and does not need bedrock data.
   const pcStart = lines.findIndex(l => l === "  'pc': {")
@@ -59,7 +57,24 @@ function writeTrimmedDataJs (versions) {
   if (pcStart === -1 || bedrockStart === -1) throw new Error('无法定位 data.js 的 pc/bedrock 区块')
 
   const pcBlocks = blocks.filter(b => b.start > pcStart && b.start < bedrockStart)
-  const kept = pcBlocks.filter(b => wanted.has(b.key))
+  const available = new Set(pcBlocks.map(b => b.key))
+  const resolveDataKey = (version) => {
+    if (available.has(version)) return version
+    if (version === '1.8.8' && available.has('1.8')) return '1.8'
+    const parts = version.split('.')
+    if (parts.length >= 3 && available.has(parts.slice(0, 2).join('.'))) return parts.slice(0, 2).join('.')
+    return null
+  }
+  const kept = []
+  const missing = []
+  for (const version of versions) {
+    const dataKey = resolveDataKey(version)
+    if (!dataKey) { missing.push(version); continue }
+    const block = pcBlocks.find(b => b.key === dataKey)
+    if (!block) { missing.push(version); continue }
+    kept.push({ requested: version, block })
+  }
+
 
   if (kept.length === 0) throw new Error('没有匹配的 Minecraft 版本可打包')
 
@@ -68,7 +83,8 @@ function writeTrimmedDataJs (versions) {
   out.push('{')
   out.push("  'pc': {")
 
-  kept.forEach((block, idx) => {
+  kept.forEach((item, idx) => {
+    const block = item.block
     const last = idx === kept.length - 1
     for (let i = block.start; i <= block.end; i++) {
       let line = lines[i]
@@ -85,7 +101,7 @@ function writeTrimmedDataJs (versions) {
 
   const next = out.join('\n') + '\n'
   fs.writeFileSync(DATA_JS, next, 'utf8')
-  return { kept: kept.map(b => b.key), bytes: Buffer.byteLength(next), missing: versions.filter(v => !kept.some(b => b.key === v)) }
+  return { kept: kept.map(item => item.requested), bytes: Buffer.byteLength(next), missing }
 }
 
 function restoreDataJs () {
