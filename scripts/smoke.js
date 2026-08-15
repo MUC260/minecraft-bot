@@ -102,4 +102,47 @@ function mockBotForReactive () {
   assert.strictEqual(rc._canEngage(many), false, 'multiple threats should be denied by maxMeleeEngageThreatCount')
 }
 
-console.log('smoke: OK')
+// 5. ReactiveController must not quit the server on critical health without an escape path.
+{
+  const bot = mockBotForReactive()
+  bot.health = 2
+  bot.quitCalls = 0
+  bot.quit = function (reason) { this.quitCalls++; this.lastQuitReason = reason }
+  bot.inventory.items = function () { return [{ name: 'stone_sword', slot: 1 }] }
+  const rc = new ReactiveController(bot, { lowHealthFleeThreshold: 8, criticalHealthLogoutThreshold: 4 }, {})
+  rc.pathfinderOwner = new PathfinderOwner(mockBotForPathfinder())
+  rc.movements = {}
+  rc._startFlee({
+    entity: { name: 'zombie', id: 1, position: { x: 2, y: 64, z: 0, clone () { return this } } },
+    distance: 2,
+    threats: []
+  }, Date.now())
+  assert.strictEqual(bot.quitCalls, 0, 'critical health with no escape path must not call bot.quit')
+  assert.strictEqual(rc.shuttingDown, false, 'critical health must not mark shuttingDown')
+}
+
+// 6. protect follows the owner instead of attacking when health is low.
+{
+  const actions = require('../core/actions')
+  let attacked = 0
+  const playerPos = { x: 0, y: 64, z: 0, distanceTo () { return 1 } }
+  const bot = {
+    health: 5,
+    entity: { position: { x: 0, y: 64, z: 0, distanceTo () { return 1 } } },
+    players: { Steve: { entity: { position: playerPos } } },
+    reactiveController: { cfg: { lowHealthFleeThreshold: 8 } },
+    attack () { attacked++ },
+    lookAt () {},
+    pathfinderOwner: null,
+    pathfinder: null
+  }
+  const result = actions.handlers.protect(bot, { username: 'Steve', radius: 12 }, {})
+  Promise.resolve(result).then((text) => {
+    assert.strictEqual(attacked, 0, 'protect must not attack while low health')
+    assert(text.includes('???'), 'protect low-health result should mention following owner')
+    console.log('smoke: OK')
+  }).catch((err) => {
+    console.error(err)
+    process.exit(1)
+  })
+}
