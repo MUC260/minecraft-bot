@@ -1,4 +1,4 @@
-﻿const fs = require('fs')
+const fs = require('fs')
 const path = require('path')
 const logger = require('../lib/logger')
 const { chatCompletion, parseActions } = require('./provider')
@@ -59,6 +59,10 @@ class Brain {
     if (this.timer) clearTimeout(this.timer)
     this.timer = null
     logger.info('AI 决策循环停止')
+  }
+
+  nudge (ms = 0) {
+    this._kick(ms)
   }
 
   _kick (ms = 0) {

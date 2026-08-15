@@ -1,7 +1,8 @@
-﻿const assert = require('assert')
+const assert = require('assert')
 const { EventEmitter } = require('events')
 const PathfinderOwner = require('../core/pathfinderOwner')
 const Brain = require('../ai/brain')
+const ChatCommander = require('../core/chatCommander')
 const ReactiveController = require('../core/reactive')
 
 function mockBotForPathfinder () {
@@ -61,7 +62,26 @@ function mockBotForReactive () {
   brain.destroy()
 }
 
-// 3. ReactiveController refuses unsafe melee engagements.
+// 3. ChatCommander parses owner chat commands.
+{
+  const agent = new EventEmitter()
+  const brain = { setGoal () {}, nudge () {} }
+  const cm = new ChatCommander(agent, brain, { mc: { ownerName: 'Steve' } })
+  assert.strictEqual(cm.isOwner('Steve'), true)
+  assert.strictEqual(cm.isOwner('Alex'), false)
+  const chop = cm.parse('砍树', 'Steve')
+  assert.strictEqual(chop.action.name, 'chopTree')
+  const follow = cm.parse('跟我走', 'Steve')
+  assert.strictEqual(follow.action.name, 'goto')
+  assert.strictEqual(follow.action.args.username, 'Steve')
+  const stop = cm.parse('停止', 'Steve')
+  assert.strictEqual(stop.action.name, 'stop')
+  const goal = cm.parse('去找钻石', 'Steve')
+  assert.strictEqual(goal.action, undefined)
+  assert.strictEqual(goal.goal.includes('主人指令'), true)
+}
+
+// 4. ReactiveController refuses unsafe melee engagements.
 {
   const rc = new ReactiveController(mockBotForReactive(), { maxMeleeEngageThreatCount: 1, minArmorScoreToEngage: 0 }, {})
   const zombieThreat = {

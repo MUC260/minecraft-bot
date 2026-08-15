@@ -1,7 +1,8 @@
-﻿const config = require('./lib/config')
+const config = require('./lib/config')
 const logger = require('./lib/logger')
 const BotAgent = require('./core/agent')
 const Brain = require('./ai/brain')
+const ChatCommander = require('./core/chatCommander')
 const api = require('./api/server')
 
 logger.init(config.logging)
@@ -11,6 +12,7 @@ async function main () {
 
   const agent = new BotAgent(config).start()
   const brain = new Brain(agent, config.ai)
+  const commander = new ChatCommander(agent, brain, config)
 
   logger.on('log', (item) => agent.emit('log', item))
 

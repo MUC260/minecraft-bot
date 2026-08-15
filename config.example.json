@@ -3,6 +3,7 @@
         "host": "localhost",
         "port": 25565,
         "username": "MyBot",
+        "ownerName": "",
         "password": "",
         "auth": "offline",
         "reconnect": true,

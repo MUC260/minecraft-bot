@@ -189,6 +189,7 @@ class BotAgent extends EventEmitter {
     const snap = this.snapshot()
     return {
       connected: this.connected,
+      ownerName: this.mc && this.mc.ownerName ? String(this.mc.ownerName) : '',
       reason: reason || null,
       reconnectAttempts: this._reconnectAttempts,
       bot: snap.bot,

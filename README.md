@@ -94,6 +94,7 @@ GUI 启动器会把核心静默释放到 `%LOCALAPPDATA%\minecraft-bot\core`，�
 | --- | --- |
 | `mc.host` / `mc.port` | Minecraft 服务器地址和端口 |
 | `mc.username` | 机器人名字 |
+| `mc.ownerName` | 主人游戏名，多个用英文逗号分隔；设置后游戏内聊天指令才生效 |
 | `mc.auth` | `offline`（离线服）或 `microsoft` |
 | `mc.version` | 版本，留空自动识别 |
 | `mc.password` | 正版账号密码，离线留空 |
@@ -161,6 +162,24 @@ GUI 启动器会把核心静默释放到 `%LOCALAPPDATA%\minecraft-bot\core`，�
   - `meleeAttackRange`：默认 3.5
   - `defensiveAttackRange`：默认 4
 
+## 主人聊天指令（游戏内）
+
+在 `config.json` 的 `mc.ownerName` 填你的游戏名（多个用英文逗号分隔），保存后重启核心/GUI。只有主人发的聊天才会被当成指令，其他玩家聊天只会进入观测。
+
+支持的中文指令：
+
+| 你说 | 机器人行为 |
+| --- | --- |
+| 砍树 / 砍木头 / 伐木 | 立即 `chopTree` |
+| 挖矿 / 采矿 | 立即 `mineOreVein` |
+| 跟我走 / 来我这里 / 过来 | 寻路跟随你 |
+| 停止 / 停下 / 别动 | 停止移动并原地待命 |
+| 保护我 | `protect` 守卫你 |
+| 攻击僵尸 / 打骷髅 / 杀苦力怕 | `hunt` 指定目标 |
+| 其他任意一句 | 设为临时 AI 目标，交给 AI 决策 |
+
+执行过程会在 UI「事件 / 日志」和日志文件里显示，例如 `技能开始 chopTree`、`技能完成 chopTree...`。
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -199,6 +218,7 @@ pm2 save
 .
 ├─ index.js                 入口
 ├─ core/
+│  ├─ chatCommander.js     主人聊天指令
 │  ├─ agent.js              机器人连接、断线重连
 │  ├─ observations.js       游戏状态观测
 │  ├─ actions.js            动作与技能执行器

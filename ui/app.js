@@ -16,6 +16,7 @@ const FIELD_LABELS = {
   'mc.host': '服务器地址',
   'mc.port': '端口',
   'mc.username': '机器人用户名',
+  'mc.ownerName': '主人游戏名（多个用英文逗号分隔；留空则关闭听主人聊天指令）',
   'mc.password': '离线/微软密码（可选）',
   'mc.auth': '认证模式',
   'mc.version': '版本（留空自动）',
@@ -241,7 +242,7 @@ function renderStatus (s) {
   }
 
   $('aiInfo').textContent = [
-    `运行: ${s.aiRunning ? '是' : '否'}`,
+    s.ownerName ? `主人: ${s.ownerName}` : `主人: 未设置（游戏聊天不会听指令）`,
     `已启用: ${s.aiEnabled ? '是' : '否'}`,
     `目标: ${s.goal || '-'}`,
     s.lastError ? `最近错误: ${s.lastError}` : ''
