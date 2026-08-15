@@ -1,5 +1,6 @@
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
+const combat = require('../lib/combat')
 
 const STATE = Object.freeze({
   NORMAL: 'NORMAL',
@@ -101,6 +102,8 @@ class ReactiveController {
     this._lastWaterLogAt = 0
     this._autoEatBusy = false
     this._autoEatAt = 0
+    this._autoGearBusy = false
+    this._autoGearAt = 0
     this.shuttingDown = false
 
     bot.reactiveController = this
@@ -204,6 +207,9 @@ class ReactiveController {
       return
     }
     if (this.state === STATE.HAZARD) this._transition(STATE.NORMAL, 'hazard-cleared')
+
+    // 3.5 Auto gear before combat decision
+    this._autoGear(now)
 
     // 4. Hostile decision
     this._handleHostile(now)
@@ -330,8 +336,12 @@ class ReactiveController {
     if (!threat?.entity) return false
     if ((this.cfg.maxMeleeEngageThreatCount ?? 1) < 1) return false
     const held = this.bot.heldItem
-    const weapon = held && /sword|axe|trident|mace/.test(held.name || '')
-    return !!weapon
+    const best = combat.bestMeleeWeapon(this.bot.inventory.items())
+    if (!best && !(held && combat.isMeleeWeapon(held))) return false
+    if (this.cfg.requireShieldToEngage && !combat.hasShield(this.bot)) return false
+    const currentArmor = combat.currentArmorScore(this.bot)
+    if (currentArmor < (this.cfg.minArmorScoreToEngage ?? 0)) return false
+    return true
   }
 
   _shouldRepathFlee (threat) {
@@ -353,6 +363,10 @@ class ReactiveController {
         this._transition(STATE.NORMAL, 'no-verified-escape-path')
       }
       this.bot.emit('reactive:log', { level: 'warn', message: `低血量但无可靠逃跑路径，不转身逃跑 (${threat.entity.name} ${round(threat.distance)}m)` })
+      this._prepareCombatLoadout(now)
+      if (combat.hasShield(this.bot)) {
+        try { this.bot.activateItem(true) } catch {}
+      }
       if (threat.distance <= 4) {
         try { this.bot.attack(threat.entity) } catch {}
       }
@@ -397,6 +411,7 @@ class ReactiveController {
 
     const baseAngle = Math.atan2(dz, dx)
     const distances = [10, 14, 8]
+    const candidates = []
     for (const dist of distances) {
       for (let i = 0; i < 8; i++) {
         const angle = baseAngle + (i - 3.5) * 0.4
@@ -412,15 +427,75 @@ class ReactiveController {
         }
         if (!result || !Array.isArray(result.path)) continue
         const pathLength = result.path.length
-        if (result.status === 'success' && pathLength >= minPathLength) {
-          return { target, pathLength, status: 'success' }
-        }
-        if (result.status === 'partial' && pathLength >= minPathLength + 2) {
-          return { target, pathLength, status: 'partial' }
-        }
+        const valid = result.status === 'success' && pathLength >= minPathLength
+        if (!valid && !(result.status === 'partial' && pathLength >= minPathLength + 2)) continue
+
+        const feet = this.bot.blockAt(new Vec3(x, y, z))
+        const head = this.bot.blockAt(new Vec3(x, y + 1, z))
+        const ground = this.bot.blockAt(new Vec3(x, y - 1, z))
+        if (!ground || ground.boundingBox === 'empty') continue
+        if (feet && (WATER_BLOCKS.has(feet.name) || DANGER_BLOCKS.has(feet.name))) continue
+        if (head && (WATER_BLOCKS.has(head.name) || DANGER_BLOCKS.has(head.name))) continue
+        if (ground && (WATER_BLOCKS.has(ground.name) || DANGER_BLOCKS.has(ground.name))) continue
+
+        const threatDist = distance3({ x, y, z }, threat.entity.position)
+        const safetyBonus = Math.max(0, 10 - threatDist)
+        const score = pathLength * 1.0 - safetyBonus * 1.5 + (result.status === 'partial' ? 4 : 0)
+        candidates.push({ target, pathLength, status: result.status, threatDist, score })
       }
     }
-    return null
+
+    if (!candidates.length) return null
+    candidates.sort((a, b) => a.score - b.score)
+    const best = candidates[0]
+    return { target: best.target, pathLength: best.pathLength, status: best.status, threatDist: round(best.threatDist) }
+  }
+
+  _shouldGearForCombat () {
+    if (this.state === STATE.ENGAGING || this.state === STATE.FLEEING) return true
+    const health = this.bot.health ?? 20
+    return health <= (this.cfg.lowHealthFleeThreshold ?? 8)
+  }
+
+  _autoGear (now) {
+    if (this._autoGearBusy) return
+    if (now - this._autoGearAt < 1500) return
+    if (this.bot.skillExecutor && this.bot.skillExecutor.busy) return
+    if (![STATE.NORMAL, STATE.ENGAGING, STATE.FLEEING].includes(this.state)) return
+
+    this._autoGearBusy = true
+    this._autoGearAt = now
+    ;(async () => {
+      try {
+        const armor = await combat.equipBestArmor(this.bot)
+        if (this._shouldGearForCombat()) {
+          await combat.equipBestMelee(this.bot)
+          if (this.cfg.requireShieldToEngage || this.bot.health <= (this.cfg.lowHealthFleeThreshold ?? 8)) {
+            await combat.equipShield(this.bot)
+          }
+        }
+        if (armor && armor.length) {
+          this.bot.emit('reactive:log', { level: 'info', message: '自动装备护甲: ' + armor.join(', ') })
+        }
+      } catch (err) {
+        this.bot.emit('reactive:log', { level: 'warn', message: '自动装备失败: ' + (err.message || err) })
+      } finally {
+        this._autoGearBusy = false
+      }
+    })()
+  }
+
+  _prepareCombatLoadout (now) {
+    if (now - this._autoGearAt < 800) return
+    this._autoGearAt = now
+    ;(async () => {
+      try {
+        await combat.equipBestMelee(this.bot)
+        await combat.equipShield(this.bot)
+      } catch (err) {
+        this.bot.emit('reactive:log', { level: 'warn', message: '战斗装备切换失败: ' + (err.message || err) })
+      }
+    })()
   }
 
   _autoEat (now) {
@@ -469,7 +544,12 @@ class ReactiveController {
       lastTransition: this.lastTransition,
       fleeingFrom: this._fleeingFrom ? this._fleeingFrom.name : null,
       engaging: this._engaging ? this._engaging.name : null,
-      escapeTarget: this._lastEscapeTarget?.target || null
+      escapeTarget: this._lastEscapeTarget?.target || null,
+      combat: {
+        armor: combat.armorSummary(this.bot),
+        weapon: combat.heldWeaponSummary(this.bot),
+        shield: combat.hasShield(this.bot)
+      }
     }
   }
 }

@@ -100,17 +100,17 @@ function restoreDataJs () {
 }
 
 function runPkg () {
-  const pkgBin = path.join(ROOT, 'node_modules', '.bin', 'pkg')
   const exe = process.platform === 'win32' ? 'pkg.cmd' : 'pkg'
   const cmd = path.join(ROOT, 'node_modules', '.bin', exe)
-  const target = process.env.PKG_TARGET || (process.env.PKG_SEA === '1' ? 'node24-win-x64' : 'node22-win-x64')
+  const target = process.env.PKG_TARGET || 'node24-win-x64'
+  const useSea = process.env.PKG_SEA !== '0'
   const args = [
     '.',
     '--out-path', 'dist',
     '--target', target,
     '--compress', 'Brotli'
   ]
-  if (process.env.PKG_SEA === '1') args.splice(1, 0, '--sea')
+  if (useSea) args.splice(1, 0, '--sea')
   if (process.env.DEBUG_PKG === '1') args.push('--debug')
   const res = spawnSync(cmd, args, { cwd: ROOT, stdio: 'inherit', shell: process.platform === 'win32' })
   if (res.error) throw res.error

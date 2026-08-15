@@ -1,6 +1,7 @@
-const { Vec3 } = require('vec3')
+﻿const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const observations = require('./observations')
+const combat = require('../lib/combat')
 
 function abortError (reason) {
   const e = new Error(reason || 'task aborted')
@@ -68,6 +69,54 @@ function getBlock (bot, x, y, z) {
   return bot.blockAt(new Vec3(Number(x), Number(y), Number(z)))
 }
 
+function isDroppedItemEntity (bot, entity) {
+  if (!entity || entity === bot.entity) return false
+  const name = String(entity.name || '').toLowerCase()
+  const type = String(entity.type || '').toLowerCase()
+  return type === 'object' || name === 'item' || name === 'item_stack'
+}
+
+function nearestItemDrop (bot, radius) {
+  let best = null
+  for (const entity of Object.values(bot.entities || {})) {
+    if (!isDroppedItemEntity(bot, entity)) continue
+    const dist = bot.entity.position.distanceTo(entity.position)
+    if (dist > radius) continue
+    if (!best || dist < best.distance) best = { entity, distance: dist }
+  }
+  return best
+}
+
+function findNearestBlock (bot, args) {
+  const radius = Math.max(1, Math.min(Number(args.radius ?? 12), 32))
+  const name = String(args.name || '').toLowerCase()
+  if (!name || !bot.findBlocks) return null
+  let positions = []
+  try {
+    positions = bot.findBlocks({
+      matching: block => {
+        if (!block || !block.name) return false
+        const n = String(block.name || '').toLowerCase()
+        const dn = String(block.displayName || '').toLowerCase()
+        return n === name || dn === name
+      },
+      maxDistance: radius,
+      count: 24
+    })
+  } catch {
+    return null
+  }
+  if (!positions || !positions.length) return null
+  let best = null
+  for (const pos of positions) {
+    const block = bot.blockAt(pos)
+    if (!block) continue
+    const dist = bot.entity.position.distanceTo(block.position)
+    if (!best || dist < best.distance) best = { block, distance: dist }
+  }
+  return best ? best.block : null
+}
+
 async function lookAtTarget (bot, args) {
   let entity = null
   if (args.username) {
@@ -130,6 +179,25 @@ function waitForGoal (bot, ctx, timeoutMs = 60000) {
   })
 }
 
+async function pathNear (bot, ctx, x, y, z, range = 1, timeoutMs = 60000) {
+  if (!bot.pathfinder) throw new Error('pathfinder 未加载')
+  const acquired = acquirePathfinder(bot, ctx, 'navigate')
+  if (!acquired.ok) return acquired
+  const acq = acquired.acq
+  try {
+    const goal = new goals.GoalNear(x, y, z, range)
+    const installed = setPathfinderGoal(bot, acq, goal)
+    if (!installed.ok) return { ok: false, reason: installed.reason }
+    const r = await waitForGoal(bot, ctx, timeoutMs)
+    if (r.kind === 'preempted') return { preempted: true, reason: 'reactive 抢占路径' }
+    if (r.kind === 'reached') return { ok: true }
+    if (r.kind === 'noPath' || r.kind === 'timeout') throw new Error('寻路失败: ' + r.kind)
+    throw new Error('寻路未完成: ' + r.kind)
+  } finally {
+    acq.release()
+  }
+}
+
 const handlers = {
   chat: async (bot, args) => {
     const message = String(args.message || '').slice(0, 100)
@@ -179,6 +247,8 @@ const handlers = {
   },
 
   attack: async (bot, args) => {
+    try { await combat.equipBestMelee(bot) } catch {}
+    try { await combat.equipShield(bot) } catch {}
     const target = findEntity(bot, args)
     if (!target) throw new Error('附近没有可攻击目标')
     await bot.attack(target)
@@ -241,12 +311,75 @@ const handlers = {
     return `在 ${block.name} 上放置`
   },
 
+  collect: async (bot, args, ctx) => {
+    const x = Number(args.x)
+    const y = Number(args.y)
+    const z = Number(args.z)
+    const hasPos = [x, y, z].every(Number.isFinite)
+    let block = null
+    let itemDrop = null
+
+    if (hasPos) {
+      block = bot.blockAt(new Vec3(x, y, z))
+      if (!block || block.boundingBox === 'empty') {
+        itemDrop = nearestItemDrop(bot, 4)
+      }
+    } else {
+      block = findNearestBlock(bot, args)
+      if (!block) itemDrop = nearestItemDrop(bot, Math.min(Number(args.radius ?? 12), 24))
+    }
+
+    if (!block && !itemDrop) throw new Error('附近没有可采集的方块或掉落物')
+    if (block) {
+      const dist = bot.entity.position.distanceTo(block.position)
+      if (dist > 3.5) {
+        const nav = await pathNear(bot, ctx, block.position.x, block.position.y, block.position.z, 1.5, 45000)
+        if (nav && nav.preempted) return nav
+        if (nav && !nav.ok) throw new Error(nav.reason || '无法到达目标方块')
+      }
+      await raceWithAbort(bot.dig(block, true), ctx, () => {
+        if (typeof bot.stopDigging === 'function') bot.stopDigging()
+      })
+      return `采集 ${block.name}`
+    }
+
+    const drop = itemDrop
+    if (drop.distance > 2.5) {
+      const nav = await pathNear(bot, ctx, drop.entity.position.x, drop.entity.position.y, drop.entity.position.z, 1, 45000)
+      if (nav && nav.preempted) return nav
+      if (nav && !nav.ok) throw new Error(nav.reason || '无法到达掉落物')
+    }
+    const id = drop.entity.id
+    for (let i = 0; i < 60; i++) {
+      throwIfAborted(ctx)
+      await sleep(100, ctx)
+      const stillThere = Object.values(bot.entities || {}).some(e => e && e.id === id)
+      if (!stillThere) return '拾取掉落物'
+    }
+    return '已靠近掉落物'
+  },
+
   equip: async (bot, args) => {
     const name = String(args.name || '').toLowerCase()
     const item = bot.inventory.items().find(i => i.name === name || (i.displayName && i.displayName.toLowerCase() === name))
     if (!item) throw new Error('背包里没有: ' + name)
     await bot.equip(item, 'hand')
     return `装备 ${item.displayName || item.name}`
+  },
+
+  armor: async (bot) => {
+    const equipped = await combat.equipBestArmor(bot)
+    return equipped.length ? `自动装备护甲: ${equipped.join(', ')}` : '没有更好的护甲可装备'
+  },
+
+  weapon: async (bot) => {
+    const item = await combat.equipBestMelee(bot)
+    return item ? `装备近战武器: ${item.displayName || item.name}` : '背包里没有近战武器'
+  },
+
+  shield: async (bot) => {
+    const ok = await combat.equipShield(bot)
+    return ok ? '已装备盾牌到副手' : '没有盾牌或服务器不支持副手'
   },
 
   eat: async (bot, args) => {
