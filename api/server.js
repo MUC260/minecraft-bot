@@ -1,4 +1,4 @@
-﻿const http = require('http')
+const http = require('http')
 const path = require('path')
 const express = require('express')
 const { WebSocketServer } = require('ws')
@@ -26,7 +26,9 @@ function start (agent, brain, config) {
     aiRunning: brain.running,
     aiEnabled: config.ai.enabled && !!config.ai.apiKey,
     lastError: brain.lastError || null,
-    goal: brain.goal
+    goal: brain.goal,
+    plan: brain.plan || null,
+    memory: brain.getMemory ? brain.getMemory() : null
   })
 
   agent.on('status', () => broadcast({ type: 'status', data: makeStatus() }))

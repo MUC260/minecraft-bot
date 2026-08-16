@@ -25,7 +25,8 @@ class SkillExecutor extends EventEmitter {
   _watchdog () {
     if (!this.currentCall || !this.currentController) return
     const elapsed = Date.now() - this.currentStartedAt
-    if (elapsed <= (this.skillTimeoutMs || 120000) + 10000) return
+    const limit = Number(this.currentCall?.timeoutMs) > 0 ? Number(this.currentCall.timeoutMs) : (this.skillTimeoutMs || 120000)
+    if (elapsed <= limit + 10000) return
     this.emit('skill:stuck', { call: this.currentCall, elapsedMs: elapsed })
     try { this.currentController.abort('executor-watchdog') } catch {}
   }
@@ -43,7 +44,12 @@ class SkillExecutor extends EventEmitter {
     const list = Array.isArray(calls) ? calls : [calls]
     if (list.length === 0) return
     for (const call of list) {
-      this.queue.push({ name: call.name, args: call.args || {}, _state: {} })
+      this.queue.push({
+        name: call.name,
+        args: call.args || {},
+        timeoutMs: call.timeoutMs || call.args?.timeoutMs || undefined,
+        _state: {}
+      })
     }
     this.emit('queue:enqueue', { count: list.length, queueLength: this.queue.length })
     this.start()
@@ -56,6 +62,9 @@ class SkillExecutor extends EventEmitter {
 
   requestCurrentSkillAbort (reason = 'external abort') {
     this._abortRequested = true
+    if (this.currentController) {
+      try { this.currentController.abort(reason) } catch {}
+    }
     this.emit('skill:abort-requested', { reason })
     return { ok: true }
   }
@@ -84,7 +93,7 @@ class SkillExecutor extends EventEmitter {
       try {
         result = await this._withTimeout(
           actions.executeStructured(this.bot, call, { signal: controller.signal }),
-          this.skillTimeoutMs,
+          Number(call.timeoutMs) > 0 ? Number(call.timeoutMs) : this.skillTimeoutMs,
           controller
         )
       } catch (err) {

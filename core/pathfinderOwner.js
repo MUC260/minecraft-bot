@@ -86,13 +86,12 @@ class PathfinderOwner {
     if (this._token !== token) return
     const wasOwner = this._owner
     const wasReason = this._reason
+    this._stopPathfinder('owner-release')
     this._owner = null
     this._reason = null
     this._token = null
-    if (wasOwner === 'reactive') {
-      this.lastReleasedAt = Date.now()
-      this.bot.emit('pathfinderOwner:released', wasReason)
-    }
+    this.lastReleasedAt = Date.now()
+    this.bot.emit('pathfinderOwner:released', wasReason)
   }
 
   setGoal (token, goal, { movements, dynamic = false } = {}) {

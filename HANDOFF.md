@@ -6,7 +6,7 @@
 - 协作者：`BCZZB`
 - 最新已推送提交：`9ccc124 fix: make collect autonomous and improve AI action planning`
 - 当前分支：`main`
-- 当前状态：本地 `git status` 干净，已通过 `npm run check` 和 `npm test`
+- 当前状态：本轮修复已提交到本地 `main`，已通过 `npm run check` 和 `npm test`
 
 ## 产品目标
 做一个轻量、可用的 Windows GUI 软件，让 AI 通过 API 接收游戏状态，并操作 Minecraft Java 版机器人。
@@ -38,7 +38,22 @@
 - `scripts/`：构建、检查、冒烟测试脚本。
 
 ## 最近一次修复重点
-提交 `9ccc124` 修复了用户反馈的主要问题：
+
+### 未提交的工作树改动（当前待提交）
+本轮继续修复以下问题，已通过 `npm run check` 与 `npm test`：
+- 不说话也会自己动：`ai/brain.js` 在附近有掉落物时自动插入 `collect`，避免 AI 空转；一次性命令结束后恢复自主行动，不再永久 hold。
+- 跟随会突然停：`core/chatCommander.js` 的 follow 只排一次，`ai/brain.js` 不再重复 enqueue，避免两个任务互相打断。
+- 自动拾取掉落物：`core/actions.js` 的 `pickupNearbyDrops` 默认半径 8、循环 24；砍树/挖矿/做装备前先捡掉落物。
+- 会做工作台/装备并检查背包：`core/actions.js` 强化 `craftGear`、`ensureCraftingTable`，缺原木时先砍树合成木板，缺门/火把/工作台时自动补做。
+- 建筑更好看：`houseLayout` 加斜顶/屋脊，`buildTowerPositions` 加箭窗和城垛，桥加低围栏，墙加门洞和顶部城垛。
+- 被玩家打会还手：`core/reactive.js` 新增 `_resolvePlayerEntity`，反击窗口提升到 120 秒，低血量时先装备武器/盾牌再反击，不逃跑。
+- 自动进食不丢副手盾牌：`lib/combat.js` 的 `consumePreserveLoadout` 保存/恢复手持物与副手盾牌。
+- UI 主人命令重复显示：`ui/app.js` 对聊天和事件日志按键去重，历史日志加载前清空事件去重集合。
+- 禁止隔空挖矿：`core/actions.js` 的 `blockVisible`/`findNearestBlockBy`/`digConnected`/`collect`/`mineOreVein` 在挖掘前先检查 `bot.canSeeBlock`，不可见就靠近或放弃。
+- 主人命令加前缀：`core/chatCommander.js` 默认只处理 `!` / `！` 开头的聊天，普通聊天不再逐条分析；`lib/config.js`/`config.example.json`/`ui/app.js` 增加 `mc.commandPrefix`。
+- AI 监工持续任务：`ai/prompts/system.md` 增加监工/长期目标/失败换路/不可隔空挖矿约束；停止词扩展到完成/好了/可以了/结束/完毕/done/complete/finish。
+
+### 历史提交 `9ccc124` 修复了用户反馈的主要问题：
 1. `bot.pathfinderOwner` 未挂到 bot 实例，导致采集/寻路技能报“pathfinderOwner 未初始化”。
 2. `collect` 无目标时只会找掉落物，找不到就失败，导致“让他采集就不动”。
 3. AI 看不到附近可采集方块，无法自主决策。

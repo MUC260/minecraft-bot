@@ -1,4 +1,4 @@
-const combat = require('../lib/combat')
+﻿const combat = require('../lib/combat')
 
 const HOSTILE_NAMES = new Set([
   'zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'enderman',
@@ -25,9 +25,22 @@ function isHostileName (name) {
 
 function isDroppedItemEntity (entity) {
   if (!entity) return false
+  // Canonical mineflayer check first. Some entity getters are deprecated and
+  // can be misleading, but getDroppedItem() only succeeds for real item drops.
+  if (typeof entity.getDroppedItem === 'function') {
+    try {
+      if (entity.getDroppedItem()) return true
+    } catch {}
+  }
   const name = String(entity.name || '').toLowerCase()
   const type = String(entity.type || '').toLowerCase()
-  return type === 'object' || name === 'item' || name === 'item_stack'
+  const objectType = String(entity.objectType || '').toLowerCase()
+  if (objectType === 'item') return true
+  if (name === 'item' || name === 'item_stack') return true
+  // Older mineflayer versions may only expose type="object" without objectType.
+  // Keep this as a last-resort fallback, but prefer the canonical check above.
+  if (type === 'object' && !objectType) return true
+  return false
 }
 
 function relativeOffset (bot, entity) {
@@ -87,6 +100,50 @@ function inventoryInfo (bot) {
   }
 }
 
+function lowerName (block) {
+  return String(block && block.name ? block.name : '').toLowerCase()
+}
+
+function isCollectibleBlock (block) {
+  const n = lowerName(block)
+  if (!n) return false
+  if (n.endsWith('_log') || n.endsWith('_ore') || n === 'ancient_debris') return true
+  if (n === 'pumpkin' || n === 'melon' || n === 'sugar_cane' || n === 'cactus' || n === 'bamboo') return true
+  if (n === 'wheat' || n === 'carrots' || n === 'potatoes' || n === 'beetroots' || n === 'nether_wart' || n === 'cocoa' || n === 'sweet_berry_bush') return true
+  return false
+}
+
+function nearbyTargets (bot, radius = 16, count = 20) {
+  if (!bot || !bot.entity || !bot.findBlocks) return []
+  let positions = []
+  try {
+    positions = bot.findBlocks({
+      matching: block => {
+        try { return isCollectibleBlock(block) } catch { return false }
+      },
+      maxDistance: radius,
+      count
+    })
+  } catch {
+    return []
+  }
+  const out = []
+  for (const pos of positions || []) {
+    const block = bot.blockAt(pos)
+    if (!block) continue
+    const distance = bot.entity.position.distanceTo(block.position)
+    out.push({
+      name: block.name,
+      displayName: block.displayName || block.name,
+      position: vec(block.position),
+      relative: relativeOffset(bot, { position: block.position }),
+      distance: distance ? round(distance) : null
+    })
+  }
+  out.sort((a, b) => (a.distance ?? 999) - (b.distance ?? 999))
+  return out.slice(0, count)
+}
+
 function build (bot, chatBuffer) {
   if (!bot || !bot.entity) {
     return { connected: false, bot: null, players: [], entities: [], nearbyHostiles: [], nearbyDrops: [], chat: [], inventory: null }
@@ -114,9 +171,14 @@ function build (bot, chatBuffer) {
     entities: entities.slice(0, 12).map(e => entityInfo(bot, e)),
     nearbyHostiles: hostiles.slice(0, 8).map(e => entityInfo(bot, e)),
     nearbyDrops: drops.slice(0, 8).map(e => entityInfo(bot, e)),
-    chat: (chatBuffer || []).slice(-20),
+    nearbyTargets: nearbyTargets(bot),
+    chat: Array.isArray(chatBuffer)
+      ? chatBuffer
+          .filter(item => !item || String(item.username || '').toLowerCase() !== String(bot.username || '').toLowerCase())
+          .slice(-20)
+      : [],
     inventory: inventoryInfo(bot)
   }
 }
 
-module.exports = { build, HOSTILE_NAMES, isHostileName, isDroppedItemEntity }
+module.exports = { build, inventoryInfo, HOSTILE_NAMES, isHostileName, isDroppedItemEntity }

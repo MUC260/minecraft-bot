@@ -3,6 +3,9 @@ const $ = (id) => document.getElementById(id)
 let ws = null
 let currentConfig = null
 
+const seenChatKeys = new Set()
+const seenEventKeys = new Set()
+
 const SECTION_LABELS = {
   mc: 'Minecraft 连接',
   ai: 'AI 模型',
@@ -30,6 +33,7 @@ const FIELD_LABELS = {
   'mc.pluginRegisterCommands': '首次注册指令（例如 /register {password} {password}，多个用 | 分隔）',
   'mc.pluginAuthDelayMs': '认证延迟(ms)',
   'mc.aiCommands': '\u4E3B\u4EBA\u6307\u4EE4\u4EA4\u7ED9 AI \u51B3\u7B56\uFF08\u4E0D\u786C\u7F16\u7801\u780D\u6811/\u8DDF\u968F\u7B49\uFF09',
+  'mc.commandPrefix': '\u4E3B\u4EBA\u547D\u4EE4\u524D\u7F00\uFF08\u9ED8\u8BA4 !\uFF1B\u53EA\u5904\u7406\u4EE5\u8BE5\u7B26\u53F7\u5F00\u5934\u7684\u804A\u5929\uFF09',
   'ai.enabled': '启用 AI',
   'ai.baseUrl': 'API 地址',
   'ai.apiKey': 'API Key',
@@ -38,6 +42,9 @@ const FIELD_LABELS = {
   'ai.maxTokens': '最大 Token',
   'ai.intervalMs': '决策间隔(ms)',
   'ai.planAhead': '规划前推',
+  'ai.memoryFile': '长期记忆文件路径（留空自动 logs/brain-memory.json）',
+  'ai.memoryMaxMessages': '长期记忆保留消息数',
+  'ai.memoryMaxChars': '长期记忆保留字符数',
   'api.host': '监听地址',
   'api.port': '面板端口',
   'logging.file': '写日志文件',
@@ -335,6 +342,7 @@ async function loadLogs () {
     const data = await api('/logs?limit=200')
     const el = $('events')
     el.innerHTML = ''
+    seenEventKeys.clear()
     for (const item of data.logs) appendLog('event', item)
     $('logPath').textContent = data.path ? `日志文件: ${data.path}` : '日志文件未启用'
   } catch (e) {
@@ -344,6 +352,12 @@ async function loadLogs () {
 
 function appendLog (target, item) {
   const el = target === 'chat' ? $('chat') : $('events')
+  const key = target === 'chat'
+    ? [item.username, item.message, item.time].map(String).join('|')
+    : [item.level, item.message, item.time, item.action, item.result, item.error].map(v => String(v ?? '')).join('|')
+  const seen = target === 'chat' ? seenChatKeys : seenEventKeys
+  if (seen.has(key)) return
+  seen.add(key)
   const row = document.createElement('div')
   const time = new Date(item.time || Date.now()).toLocaleTimeString()
   if (target === 'chat') {
