@@ -23,14 +23,23 @@ async function main () {
   const attachExecutorListeners = (executor) => {
     if (!executor) return
     executor.on('skill:start', ({ call }) => {
-      agent.emit('log', { level: 'info', message: `技能开始 ${call.name}` })
+      logger.info(`技能开始 ${call.name} ${JSON.stringify(call.args || {})}`)
     })
     executor.on('skill:result', ({ call, result }) => {
-      if (result.ok) agent.emit('log', { level: 'info', message: `技能完成 ${call.name}: ${result.reason}` })
-      else agent.emit('log', { level: 'warn', message: `技能失败 ${call.name}: ${result.reason}` })
+      const message = result.ok
+        ? `技能完成 ${call.name}: ${result.reason}`
+        : `技能失败 ${call.name}: ${result.reason}`
+      if (result.ok) logger.info(message)
+      else logger.warn(message)
+      if (call && call.announce && agent.connected && agent.bot && typeof agent.bot.chat === 'function') {
+        try { agent.bot.chat(String(result.ok ? `完成：${result.reason}` : `任务遇到问题：${result.reason}`).slice(0, 180)) } catch {}
+      }
     })
     executor.on('queue:failure', ({ call, result }) => {
-      agent.emit('log', { level: 'warn', message: `动作队列失败于 ${call?.name || 'unknown'}: ${result?.reason}` })
+      logger.warn(`动作队列失败于 ${call?.name || 'unknown'}: ${result?.reason}`)
+    })
+    executor.on('skill:stuck', ({ call, elapsedMs }) => {
+      logger.warn(`技能疑似卡住 ${call?.name || 'unknown'}，已运行 ${elapsedMs}ms`)
     })
   }
   attachExecutorListeners(agent.executor)

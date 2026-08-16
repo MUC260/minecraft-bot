@@ -134,6 +134,64 @@ function mockBotForReactive () {
   const goal = cm.parse('讲个笑话', 'Steve')
   assert.strictEqual(goal.action, undefined)
   assert.strictEqual(goal.goal.includes('主人指令'), true)
+
+  const countedIron = cm.parse('挖10个铁矿石给我', 'Steve')
+  assert.strictEqual(countedIron.action.name, 'mineOreVein')
+  assert.strictEqual(countedIron.action.args.name, 'iron_ore')
+  assert.strictEqual(countedIron.action.args.targetCount, 10)
+  const countedChinese = cm.parse('挖十个铁矿石', 'Steve')
+  assert.strictEqual(countedChinese.action.args.targetCount, 10)
+}
+
+// 3b. Deterministic owner commands work without ! while ordinary chat is ignored.
+{
+  const agent = new EventEmitter()
+  const enqueued = []
+  const said = []
+  agent.connected = true
+  agent.bot = { username: 'Bot', chat (message) { said.push(message) } }
+  agent.executor = {
+    currentCall: null,
+    clear () {},
+    enqueue (call) { enqueued.push(call) }
+  }
+  const brain = {
+    setGoal () {},
+    alignPlanToAction () {},
+    recordAction () {},
+    clearFollow () {},
+    setHold () {},
+    setFollow () {},
+    nudge () {}
+  }
+  const cm = new ChatCommander(agent, brain, { mc: { ownerName: 'Steve', commandPrefix: '!' } })
+  cm.onChat({ username: 'Steve', message: '跟随我' })
+  assert.strictEqual(enqueued[0].name, 'follow', 'follow should work without command prefix')
+  cm.onChat({ username: 'Steve', message: '挖10个铁矿石给我' })
+  assert.strictEqual(enqueued[1].name, 'mineOreVein', 'counted mining should work without command prefix')
+  assert.strictEqual(enqueued[1].args.targetCount, 10)
+  cm.onChat({ username: 'Steve', message: '今天天气不错' })
+  assert.strictEqual(enqueued.length, 2, 'ordinary owner chat should not become a command without prefix')
+  assert(said.some(message => message.includes('持续跟随')), 'owner should receive immediate acknowledgement')
+}
+
+// 3c. Persistent follow is re-enqueued after the executor is replaced on reconnect.
+{
+  const firstExecutor = new EventEmitter()
+  firstExecutor.queue = []
+  firstExecutor.enqueue = function (call) { this.queue.push(call) }
+  const agent = { executor: firstExecutor, connected: true, snapshot () { return {} }, emit () {} }
+  const brain = new Brain(agent, { intervalMs: 1500 })
+  brain.setFollow('Steve', 2)
+  const nextExecutor = new EventEmitter()
+  nextExecutor.queue = []
+  nextExecutor.enqueue = function (call) { this.queue.push(call) }
+  brain.setExecutor(nextExecutor)
+  brain._clearFollowRetry()
+  brain._reFollow()
+  assert.strictEqual(nextExecutor.queue.length, 1)
+  assert.strictEqual(nextExecutor.queue[0].name, 'follow')
+  brain.destroy()
 }
 
 // 4. ReactiveController refuses unsafe melee engagements.

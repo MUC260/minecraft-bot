@@ -74,7 +74,10 @@ class Brain {
     if (this.executor === executor) return this.executor
     if (this.executor) this._unbindExecutor(this.executor)
     this.executor = executor
-    if (executor) this._bindExecutor(executor)
+    if (executor) {
+      this._bindExecutor(executor)
+      if (this.followTarget && !this.holdPosition) this._scheduleRefollow(500)
+    }
     return this.executor
   }
 
@@ -231,6 +234,9 @@ class Brain {
 
   _reFollow () {
     if (!this.followTarget || this.holdPosition || !this.executor) return
+    const alreadyQueued = this.executor.currentCall?.name === 'follow' ||
+      (Array.isArray(this.executor.queue) && this.executor.queue.some(call => call && call.name === 'follow'))
+    if (alreadyQueued) return
     const call = { name: 'follow', args: { username: this.followTarget.username, distance: this.followTarget.distance }, timeoutMs: 86400000 }
     this.executor.enqueue(call)
   }
@@ -272,8 +278,9 @@ class Brain {
     return true
   }
 
-  _timeoutFor (name) {
+  _timeoutFor (name, args = {}) {
     if (name === 'follow') return 86400000
+    if (name === 'mineOreVein' && Number(args.targetCount || args.count) > 0) return 600000
     if (['buildHouse', 'buildTower', 'buildBridge', 'buildWall', 'buildShelter', 'craft', 'craftGear'].includes(name)) return 240000
     return undefined
   }
@@ -309,7 +316,7 @@ class Brain {
     this._recordAssistantActions(plan)
     this.agent.emit('aiPlan', { actions: plan, at: Date.now() })
 
-    const calls = plan.map(a => ({ name: a.name, args: a.args || {}, timeoutMs: this._timeoutFor(a.name) }))
+    const calls = plan.map(a => ({ name: a.name, args: a.args || {}, timeoutMs: this._timeoutFor(a.name, a.args || {}) }))
     this.executor && this.executor.enqueue(calls)
   }
 

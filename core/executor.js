@@ -48,6 +48,8 @@ class SkillExecutor extends EventEmitter {
         name: call.name,
         args: call.args || {},
         timeoutMs: call.timeoutMs || call.args?.timeoutMs || undefined,
+        announce: call.announce === true,
+        requester: call.requester || null,
         _state: {}
       })
     }

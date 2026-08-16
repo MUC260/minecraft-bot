@@ -42,19 +42,57 @@ const MOB_ALIASES = {
 }
 
 const ORE_ALIASES = {
-  "钻石": "diamond_ore",
-  "钻": "diamond_ore",
-  "铁": "iron_ore",
-  "煤": "coal_ore",
-  "金子": "gold_ore",
-  "黄金": "gold_ore",
-  "金": "gold_ore",
-  "青金石": "lapis_ore",
-  "红石": "redstone_ore",
-  "铜": "copper_ore",
-  "绿宝石": "emerald_ore",
+  钻石矿石: 'diamond_ore',
+  钻石: 'diamond_ore',
+  钻: 'diamond_ore',
+  铁矿石: 'iron_ore',
+  铁矿: 'iron_ore',
+  铁: 'iron_ore',
+  煤矿石: 'coal_ore',
+  煤矿: 'coal_ore',
+  煤: 'coal_ore',
+  金矿石: 'gold_ore',
+  金矿: 'gold_ore',
+  金子: 'gold_ore',
+  黄金: 'gold_ore',
+  金: 'gold_ore',
+  青金石矿石: 'lapis_ore',
+  青金石: 'lapis_ore',
+  红石矿石: 'redstone_ore',
+  红石: 'redstone_ore',
+  铜矿石: 'copper_ore',
+  铜矿: 'copper_ore',
+  铜: 'copper_ore',
+  绿宝石矿石: 'emerald_ore',
+  绿宝石: 'emerald_ore'
 }
-const ORE_NAME_RE = /(?:找|挖|开采|采集|去挖|去找)(钻石|钻|铁|煤|金子|黄金|金|青金石|红石|铜|绿宝石)/
+
+const ORE_NAME_RE = /(?:找|挖|开采|采集|去挖|去找)(?:一下|一些)?(?:(\d+|[零〇一二两三四五六七八九十百]+)(?:个|块|颗)?)?(?:的)?(钻石矿石|钻石|钻|铁矿石|铁矿|铁|煤矿石|煤矿|煤|金矿石|金矿|金子|黄金|金|青金石矿石|青金石|红石矿石|红石|铜矿石|铜矿|铜|绿宝石矿石|绿宝石)/
+
+function chineseNumber (value) {
+  const text = String(value || '').trim()
+  if (!text) return null
+  if (/^\d+$/.test(text)) return Number(text)
+  const digits = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
+  if (text === '十') return 10
+  if (text === '百') return 100
+  let total = 0
+  let current = 0
+  for (const ch of text) {
+    if (Object.prototype.hasOwnProperty.call(digits, ch)) {
+      current = digits[ch]
+    } else if (ch === '十') {
+      total += (current || 1) * 10
+      current = 0
+    } else if (ch === '百') {
+      total += (current || 1) * 100
+      current = 0
+    } else {
+      return null
+    }
+  }
+  return total + current
+}
 
 class ChatCommander {
   constructor (agent, brain, config) {
@@ -103,8 +141,10 @@ class ChatCommander {
     if (!this.isOwner(item.username)) return
     const raw = String(item.message || '').trim()
     if (!raw) return
-    const command = this._commandText(raw)
-    if (!command) return
+    const prefixedCommand = this._commandText(raw)
+    const prefix = this.commandPrefix == null ? '' : String(this.commandPrefix)
+    const hasExplicitPrefix = prefixedCommand !== null
+    const command = hasExplicitPrefix ? prefixedCommand : raw
 
     // The same owner chat event can arrive more than once from game/UI relays.
     const dedupeKey = String(item.username || '').toLowerCase() + '\u0000' + raw
@@ -119,11 +159,12 @@ class ChatCommander {
       }
     }
 
-    const parsed = this.parse(command, item.username)
+    const parsed = this.parse(command, item.username, { allowGoalFallback: hasExplicitPrefix || !prefix })
     if (!parsed) return
 
     item.handled = true
     logger.info(`\u4e3b\u4eba\u6307\u4ee4 ${item.username}: ${raw}`)
+    this._ack(parsed.ack || (parsed.action ? `收到，开始执行：${command}` : `收到任务：${command}`))
 
     if (parsed.action) {
       this.brain.setGoal(parsed.goal)
@@ -137,13 +178,21 @@ class ChatCommander {
     if (this.brain.nudge) this.brain.nudge(120)
   }
 
+
+  _ack (message) {
+    const bot = this.agent && this.agent.bot
+    const text = String(message || '').trim()
+    if (!bot || !text || typeof bot.chat !== 'function') return
+    try { bot.chat(text.slice(0, 180)) } catch {}
+  }
+
   _dispatchAction (action) {
     if (!action || !this.agent.executor) return
     const executor = this.agent.executor
     executor.clear()
     if (executor.currentCall) executor.requestCurrentSkillAbort('user command')
 
-    const call = { name: action.name, args: action.args || {} }
+    const call = { name: action.name, args: action.args || {}, announce: true, requester: 'owner' }
     if (this.brain && typeof this.brain.alignPlanToAction === 'function') {
       this.brain.alignPlanToAction(call)
     }
@@ -184,10 +233,11 @@ class ChatCommander {
     this.brain.setHold(false)
     remember(call.name, call.args)
     const longBuild = ['buildHouse', 'buildTower', 'buildBridge', 'buildWall'].includes(call.name)
-    executor.enqueue({ ...call, timeoutMs: longBuild ? 240000 : undefined })
+    const countedMining = call.name === 'mineOreVein' && Number(call.args.targetCount || call.args.count) > 0
+    executor.enqueue({ ...call, timeoutMs: countedMining ? 600000 : (longBuild ? 240000 : undefined) })
   }
 
-  parse (raw, senderUsername) {
+  parse (raw, senderUsername, options = {}) {
     const text = compact(raw)
     const normalized = normalize(raw)
     if (!text) return null
@@ -206,10 +256,33 @@ class ChatCommander {
       }
     }
 
+    const oreMatch = text.match(ORE_NAME_RE)
+    if (oreMatch) {
+      const requested = oreMatch[2]
+      const oreName = ORE_ALIASES[requested]
+      const count = chineseNumber(oreMatch[1])
+      if (oreName) {
+        const args = { name: oreName }
+        if (Number.isFinite(count) && count > 0) {
+          args.targetCount = Math.max(1, Math.min(256, Math.floor(count)))
+        }
+        return {
+          action: { name: 'mineOreVein', args },
+          goal: Number.isFinite(count) && count > 0
+            ? `开采并拾取 ${args.targetCount} 个${requested}，完成前持续推进。`
+            : `持续寻找并开采${requested}，直到我说停止或完成。`,
+          ack: Number.isFinite(count) && count > 0
+            ? `收到，开始挖 ${args.targetCount} 个${requested}。`
+            : `收到，开始寻找并开采${requested}。`
+        }
+      }
+    }
+
     if (/挖(矿|石头|矿石)|采矿|下矿|mine|mineore|minestone/.test(text)) {
       return {
         action: { name: 'mineOreVein', args: {} },
-        goal: '持续寻找并开采矿石，直到我说停止或完成。'
+        goal: '持续寻找并开采矿石，直到我说停止或完成。',
+        ack: '收到，开始寻找矿石。'
       }
     }
 
@@ -231,7 +304,8 @@ class ChatCommander {
       const username = String(senderUsername || '').trim()
       return {
         action: { name: 'follow', args: { username, distance: 2 } },
-        goal: '跟随主人 ' + username + '，保持跟随，直到我说停止。'
+        goal: '跟随主人 ' + username + '，保持跟随，直到我说停止。',
+        ack: '收到，开始持续跟随你。'
       }
     }
 
@@ -268,17 +342,6 @@ class ChatCommander {
       return {
         action: { name: 'buildWall', args: {} },
         goal: '造墙任务已开始，我会在前面搭一面墙。'
-      }
-    }
-
-    const oreMatch = text.match(ORE_NAME_RE)
-    if (oreMatch) {
-      const oreName = ORE_ALIASES[oreMatch[1]]
-      if (oreName) {
-        return {
-          action: { name: 'mineOreVein', args: { name: oreName } },
-          goal: '持续寻找并开采 ' + oreMatch[1] + ' 矿，直到我说停止或完成。'
-        }
       }
     }
 
@@ -323,8 +386,9 @@ class ChatCommander {
       }
     }
 
-    // Anything else with the command prefix becomes an AI goal.
-    return { goal: '主人指令：' + raw }
+    // 普通聊天只触发上面的明确技能；带前缀的未知命令才交给 AI。
+    if (options.allowGoalFallback === false) return null
+    return { goal: '主人指令：' + raw, ack: '收到，我正在规划这个任务。' }
   }
 }
 
