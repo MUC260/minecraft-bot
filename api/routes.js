@@ -106,50 +106,28 @@ module.exports = function createRouter (agent, brain, config) {
     res.json({ ok: true, goal })
   })
 
+  router.get('/ai/memory', (req, res) => {
+    try {
+      res.json({ ok: true, memory: brain.getMemory ? brain.getMemory() : null })
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message })
+    }
+  })
+
+  router.post('/ai/memory/reset', (req, res) => {
+    try {
+      const memory = brain.resetMemory ? brain.resetMemory() : null
+      notify()
+      res.json({ ok: true, memory })
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message })
+    }
+  })
+
   router.post('/ai/tick', async (req, res) => {
     try {
       await brain.tick()
       res.json({ ok: true })
-    } catch (e) {
-      res.status(500).json({ ok: false, error: e.message })
-    }
-  })
-
-  // 查看当前长期行动大纲（3 分钟规划结果）
-  router.get('/ai/plan', (req, res) => {
-    res.json({
-      ok: true,
-      goal: brain.goal,
-      longTermPlan: brain.longTermPlan || null,
-      plannedAt: brain.longTermPlanAt || 0,
-      intervalMs: brain.planIntervalMs || 0,
-      awakeningEnabled: brain.awakeningEnabled === true
-    })
-  })
-
-  router.post('/ai/awakening', (req, res) => {
-    const enabled = brain.setAwakening(req.body && req.body.enabled)
-    notify()
-    res.json({ ok: true, enabled, intervalMs: brain.planIntervalMs })
-  })
-
-  // 立即触发一次长期规划
-  router.post('/ai/plan/now', async (req, res) => {
-    try {
-      await brain._makeLongTermPlan()
-      res.json({ ok: true, longTermPlan: brain.longTermPlan })
-    } catch (e) {
-      res.status(500).json({ ok: false, error: e.message })
-    }
-  })
-
-  // 通用 AI 分析接口：其他情况按需调用（聊天响应/突发情况/查询等）
-  router.post('/ai/analyze', async (req, res) => {
-    try {
-      const { text, context } = req.body || {}
-      if (!text) return res.status(400).json({ ok: false, error: '缺少 text' })
-      const actions = await brain.analyze(text, context || {})
-      res.json({ ok: true, actions })
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message })
     }
@@ -161,10 +139,8 @@ module.exports = function createRouter (agent, brain, config) {
     status.aiEnabled = config.ai.enabled && !!config.ai.apiKey
     status.lastError = brain.lastError || null
     status.goal = brain.goal
-    status.longTermPlan = brain.longTermPlan || null
-    status.longTermPlanAt = brain.longTermPlanAt || 0
-    status.awakeningEnabled = brain.awakeningEnabled === true
-    status.awakeningIntervalMs = brain.planIntervalMs || 0
+    status.plan = brain.plan || null
+    status.memory = brain.getMemory ? brain.getMemory() : null
     return status
   }
 
