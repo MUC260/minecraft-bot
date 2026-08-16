@@ -15,8 +15,7 @@
         "pluginLoginCommands": "/login {password}",
         "pluginRegisterCommands": "",
         "pluginAuthDelayMs": 1500,
-        "aiCommands": true,
-        "commandPrefix": "!"
+        "aiCommands": true
     },
     "ai": {
         "enabled": true,
@@ -27,9 +26,8 @@
         "maxTokens": 1200,
         "intervalMs": 1500,
         "planAhead": true,
-        "memoryFile": "",
-        "memoryMaxMessages": 40,
-        "memoryMaxChars": 32000
+        "awakeningEnabled": false,
+        "awakeningIntervalMs": 120000
     },
     "api": {
         "host": "127.0.0.1",
