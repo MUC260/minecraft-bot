@@ -120,12 +120,8 @@ class Brain {
         { role: 'user', content: JSON.stringify(payload) }
       ]
       const data = await chatCompletion({
-        baseUrl: this.config.baseUrl,
-        apiKey: this.config.apiKey,
-        model: this.config.model,
-        messages,
-        temperature: 0.3,
-        maxTokens: 800
+        ...this._chatOpts({ temperature: 0.3, maxTokens: 800 }),
+        messages
       })
       const content = (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || ''
       const plan = this._parsePlan(content)
@@ -178,6 +174,23 @@ class Brain {
     this._kick(this.config.intervalMs || 1500)
   }
 
+  // 构造带降级配置的请求参数
+  _chatOpts (extra) {
+    return {
+      baseUrl: this.config.baseUrl,
+      apiKey: this.config.apiKey,
+      model: this.config.model,
+      temperature: this.config.temperature,
+      maxTokens: this.config.maxTokens,
+      fallback: {
+        baseUrl: this.config.fallbackBaseUrl,
+        apiKey: this.config.fallbackApiKey,
+        model: this.config.fallbackModel
+      },
+      ...extra
+    }
+  }
+
   async tick () {
     if (process.env.DEBUG_AI) console.log('[BRAIN_TICK]', { running: this.running, ticking: this.ticking, connected: this.agent.connected, busy: this.executor && this.executor.busy })
     if (!this.running || this.ticking || !this.agent.connected) {
@@ -199,13 +212,9 @@ class Brain {
       ]
 
       const data = await chatCompletion({
-        baseUrl: this.config.baseUrl,
-        apiKey: this.config.apiKey,
-        model: this.config.model,
+        ...this._chatOpts(),
         messages,
-        tools: TOOLS,
-        temperature: this.config.temperature,
-        maxTokens: this.config.maxTokens
+        tools: TOOLS
       })
 
       const actions = this._normalizeActions(parseActions(data))
@@ -281,13 +290,9 @@ class Brain {
     ]
     try {
       const data = await chatCompletion({
-        baseUrl: this.config.baseUrl,
-        apiKey: this.config.apiKey,
-        model: this.config.model,
+        ...this._chatOpts(),
         messages,
-        tools: TOOLS,
-        temperature: this.config.temperature,
-        maxTokens: this.config.maxTokens
+        tools: TOOLS
       })
       return parseActions(data)
     } catch (e) {

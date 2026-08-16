@@ -1,4 +1,5 @@
-async function chatCompletion ({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens }) {
+// 单次请求（带超时）
+async function chatCompletionOnce ({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens }) {
   const url = String(baseUrl).replace(/\/+$/, '') + '/chat/completions'
   const body = { model, messages, temperature, max_tokens: maxTokens }
   if (tools && tools.length) body.tools = tools
@@ -27,6 +28,29 @@ async function chatCompletion ({ baseUrl, apiKey, model, messages, tools, temper
   if (process.env.DEBUG_AI) console.log("[AI_DEBUG]", res.status, text.slice(0, 600))
   if (!res.ok) throw new Error(`AI API ${res.status}: ${text.slice(0, 400)}`)
   return JSON.parse(text)
+}
+
+// 主 API + 备用降级：主失败（网络/5xx/429）时自动尝试备用
+async function chatCompletion (opts) {
+  try {
+    return await chatCompletionOnce(opts)
+  } catch (e) {
+    const fb = opts.fallback
+    // 只有配置了备用且不是同一地址时才降级
+    if (fb && fb.baseUrl && String(fb.baseUrl).replace(/\/+$/, '') !== String(opts.baseUrl || '').replace(/\/+$/, '')) {
+      if (process.env.DEBUG_AI) console.log('[AI_FALLBACK]', e.message, '→ 切换到备用 API')
+      return await chatCompletionOnce({
+        baseUrl: fb.baseUrl,
+        apiKey: fb.apiKey,
+        model: fb.model,
+        messages: opts.messages,
+        tools: opts.tools,
+        temperature: opts.temperature,
+        maxTokens: opts.maxTokens
+      })
+    }
+    throw e
+  }
 }
 
 // 从文本中提取所有 JSON 数组元素（兼容 markdown 代码块、多数组、纯文本混排）
