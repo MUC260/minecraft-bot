@@ -4,10 +4,9 @@
 - 项目路径：`D:\minecraft-bot`
 - GitHub：`https://github.com/MUC260/minecraft-bot`（当前为公开仓库）
 - 协作者：`BCZZB`
-- 最新本地提交：`9a088f6 fix: avoid unreachable mining and add task supervisor command prefix`
 - 最新已推送提交：`9ccc124 fix: make collect autonomous and improve AI action planning`
 - 当前分支：`main`
-- 当前状态：本地工作树有未提交修改（见下方“未提交的工作树改动”），已通过 `npm run check` 和 `npm test`
+- 当前状态：本轮修复已提交到本地 `main`，已通过 `npm run check` 和 `npm test`
 
 ## 产品目标
 做一个轻量、可用的 Windows GUI 软件，让 AI 通过 API 接收游戏状态，并操作 Minecraft Java 版机器人。
