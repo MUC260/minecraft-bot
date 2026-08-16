@@ -1,4 +1,4 @@
-﻿const express = require('express')
+const express = require('express')
 const logger = require('../lib/logger')
 
 module.exports = function createRouter (agent, brain, config) {
@@ -81,12 +81,47 @@ module.exports = function createRouter (agent, brain, config) {
     }
   })
 
+  // 查看当前长期行动大纲（3 分钟规划结果）
+  router.get('/ai/plan', (req, res) => {
+    res.json({
+      ok: true,
+      goal: brain.goal,
+      longTermPlan: brain.longTermPlan || null,
+      plannedAt: brain.longTermPlanAt || 0,
+      intervalMs: brain.planIntervalMs || 180000
+    })
+  })
+
+  // 立即触发一次长期规划
+  router.post('/ai/plan/now', async (req, res) => {
+    try {
+      await brain._makeLongTermPlan()
+      res.json({ ok: true, longTermPlan: brain.longTermPlan })
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message })
+    }
+  })
+
+  // 通用 AI 分析接口：其他情况按需调用（聊天响应/突发情况/查询等）
+  router.post('/ai/analyze', async (req, res) => {
+    try {
+      const { text, context } = req.body || {}
+      if (!text) return res.status(400).json({ ok: false, error: '缺少 text' })
+      const actions = await brain.analyze(text, context || {})
+      res.json({ ok: true, actions })
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message })
+    }
+  })
+
   function makeStatus () {
     const status = agent.status()
     status.aiRunning = brain.running
     status.aiEnabled = config.ai.enabled && !!config.ai.apiKey
     status.lastError = brain.lastError || null
     status.goal = brain.goal
+    status.longTermPlan = brain.longTermPlan || null
+    status.longTermPlanAt = brain.longTermPlanAt || 0
     return status
   }
 
