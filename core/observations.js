@@ -25,9 +25,22 @@ function isHostileName (name) {
 
 function isDroppedItemEntity (entity) {
   if (!entity) return false
+  // Canonical mineflayer check first. Some entity getters are deprecated and
+  // can be misleading, but getDroppedItem() only succeeds for real item drops.
+  if (typeof entity.getDroppedItem === 'function') {
+    try {
+      if (entity.getDroppedItem()) return true
+    } catch {}
+  }
   const name = String(entity.name || '').toLowerCase()
   const type = String(entity.type || '').toLowerCase()
-  return type === 'object' || name === 'item' || name === 'item_stack'
+  const objectType = String(entity.objectType || '').toLowerCase()
+  if (objectType === 'item') return true
+  if (name === 'item' || name === 'item_stack') return true
+  // Older mineflayer versions may only expose type="object" without objectType.
+  // Keep this as a last-resort fallback, but prefer the canonical check above.
+  if (type === 'object' && !objectType) return true
+  return false
 }
 
 function relativeOffset (bot, entity) {
@@ -161,7 +174,6 @@ function build (bot, chatBuffer) {
     nearbyTargets: nearbyTargets(bot),
     chat: Array.isArray(chatBuffer)
       ? chatBuffer
-          .filter(item => !item || !item.handled)
           .filter(item => !item || String(item.username || '').toLowerCase() !== String(bot.username || '').toLowerCase())
           .slice(-20)
       : [],
@@ -169,4 +181,4 @@ function build (bot, chatBuffer) {
   }
 }
 
-module.exports = { build, HOSTILE_NAMES, isHostileName, isDroppedItemEntity }
+module.exports = { build, inventoryInfo, HOSTILE_NAMES, isHostileName, isDroppedItemEntity }

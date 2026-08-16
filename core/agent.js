@@ -59,6 +59,7 @@ class BotAgent extends EventEmitter {
       resumeGateTimeoutMs: this.config.executor?.resumeGateTimeoutMs ?? 30000
     })
     bot.skillExecutor = this.executor
+    this.emit('executor', this.executor)
     this.reactive = new ReactiveController(bot, this.config.reactive || {}, {
       pathfinderOwner: this.pathfinderOwner,
       movements: this.movements
@@ -66,6 +67,14 @@ class BotAgent extends EventEmitter {
 
     this._wire(bot)
     return this
+  }
+
+  _connContext (bot) {
+    const c = this.mc || {}
+    const username = String(bot && bot.username ? bot.username : (c.username || '')).trim() || '?'
+    const host = String(c.host || '?')
+    const port = String(c.port || '?')
+    return `[host=${host}:${port} user=${username} connected=${this.connected ? 1 : 0} reconnectAttempts=${this._reconnectAttempts}]`
   }
 
   _wire (bot) {
@@ -100,7 +109,7 @@ class BotAgent extends EventEmitter {
       const text = String(reason)
       this.connected = false
       this._lastEndReason = text
-      logger.warn('被踢出:', text)
+      logger.warn(`被踢出: ${text} ${this._connContext(bot)}`)
       this.emit('status', this.status(text))
       this._scheduleReconnect(text)
     })
@@ -110,14 +119,14 @@ class BotAgent extends EventEmitter {
       const text = String(reason)
       this.connected = false
       this._lastEndReason = text
-      logger.warn('连接断开:', text)
+      logger.warn(`连接断开: ${text} ${this._connContext(bot)}`)
       this.emit('status', this.status(text))
       this._scheduleReconnect(text)
     })
 
     bot.on('error', (err) => {
       if (this.bot !== bot) return
-      logger.error('机器人错误:', err.message)
+      logger.error(`机器人错误: ${err && err.message ? err.message : err} ${this._connContext(bot)}`)
     })
 
     bot.on('death', () => {
@@ -166,7 +175,7 @@ class BotAgent extends EventEmitter {
   _scheduleReconnect (reason) {
     if (this._stopping || this._reconnectTimer) return
     const c = this.mc
-    if (!c.reconnect) return
+    if (c.reconnect === false) return
     const maxAttempts = Number(c.reconnectMaxAttempts ?? -1)
     if (maxAttempts >= 0 && this._reconnectAttempts >= maxAttempts) {
       logger.warn('达到最大重连次数，停止重连')
@@ -187,6 +196,7 @@ class BotAgent extends EventEmitter {
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null
       if (this._stopping) return
+      this._clearCurrentBot()
       this._createBot()
     }, delay)
   }

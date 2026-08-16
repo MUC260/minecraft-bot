@@ -16,23 +16,30 @@ async function main () {
 
   logger.on('log', (item) => agent.emit('log', item))
 
-  agent.executor.on('skill:start', ({ call }) => {
-    agent.emit('log', { level: 'info', message: `技能开始 ${call.name}` })
-  })
-  agent.executor.on('skill:result', ({ call, result }) => {
-    if (result.ok) agent.emit('log', { level: 'info', message: `技能完成 ${call.name}: ${result.reason}` })
-    else agent.emit('log', { level: 'warn', message: `技能失败 ${call.name}: ${result.reason}` })
-  })
-  agent.executor.on('queue:failure', ({ call, result }) => {
-    agent.emit('log', { level: 'warn', message: `动作队列失败于 ${call?.name || 'unknown'}: ${result?.reason}` })
+  const attachExecutorListeners = (executor) => {
+    if (!executor) return
+    executor.on('skill:start', ({ call }) => {
+      agent.emit('log', { level: 'info', message: `技能开始 ${call.name}` })
+    })
+    executor.on('skill:result', ({ call, result }) => {
+      if (result.ok) agent.emit('log', { level: 'info', message: `技能完成 ${call.name}: ${result.reason}` })
+      else agent.emit('log', { level: 'warn', message: `技能失败 ${call.name}: ${result.reason}` })
+    })
+    executor.on('queue:failure', ({ call, result }) => {
+      agent.emit('log', { level: 'warn', message: `动作队列失败于 ${call?.name || 'unknown'}: ${result?.reason}` })
+    })
+  }
+  attachExecutorListeners(agent.executor)
+  agent.on('executor', (executor) => {
+    attachExecutorListeners(executor)
+    brain.setExecutor(executor)
   })
 
   if (config.ai.enabled) {
-    if (!config.ai.apiKey) {
-      logger.warn('未配置 AI_API_KEY，AI 决策已禁用（仍可通过面板手动控制）')
-    } else {
-      brain.start()
+    if (!config.ai.apiKey || /^sk-xxx$/i.test(String(config.ai.apiKey))) {
+      logger.warn('未配置有效 AI_API_KEY，进入离线自主模式（仍可响应聊天指令）')
     }
+    brain.start()
   }
 
   api.start(agent, brain, config)

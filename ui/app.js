@@ -3,6 +3,9 @@ const $ = (id) => document.getElementById(id)
 let ws = null
 let currentConfig = null
 
+const seenChatKeys = new Set()
+const seenEventKeys = new Set()
+
 const SECTION_LABELS = {
   mc: 'Minecraft 连接',
   ai: 'AI 模型',
@@ -335,6 +338,7 @@ async function loadLogs () {
     const data = await api('/logs?limit=200')
     const el = $('events')
     el.innerHTML = ''
+    seenEventKeys.clear()
     for (const item of data.logs) appendLog('event', item)
     $('logPath').textContent = data.path ? `日志文件: ${data.path}` : '日志文件未启用'
   } catch (e) {
@@ -344,6 +348,12 @@ async function loadLogs () {
 
 function appendLog (target, item) {
   const el = target === 'chat' ? $('chat') : $('events')
+  const key = target === 'chat'
+    ? [item.username, item.message, item.time].map(String).join('|')
+    : [item.level, item.message, item.time, item.action, item.result, item.error].map(v => String(v ?? '')).join('|')
+  const seen = target === 'chat' ? seenChatKeys : seenEventKeys
+  if (seen.has(key)) return
+  seen.add(key)
   const row = document.createElement('div')
   const time = new Date(item.time || Date.now()).toLocaleTimeString()
   if (target === 'chat') {

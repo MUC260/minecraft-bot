@@ -1,4 +1,4 @@
-const { Vec3 } = require('vec3')
+﻿const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const combat = require('../lib/combat')
 
@@ -122,11 +122,19 @@ class ReactiveController {
     this._lastAttackAt = 0
     this._lastCombatMoveAt = 0
     this._combatMoveSign = 1
+    this._lastPlayerAttacker = null
+    this._playerAttackedAt = 0
     this.shuttingDown = false
 
     bot.reactiveController = this
     this._bind('physicsTick', () => this._tick())
     this._bind('death', () => this._transition(STATE.NORMAL, 'death-reset'))
+    this._bind('entityHurt', (entity, source) => {
+      if (entity !== this.bot.entity || !source) return
+      if (source.type !== 'player' && !source.username) return
+      this._lastPlayerAttacker = this._resolvePlayerEntity(source) || source
+      this._playerAttackedAt = Date.now()
+    })
     this._bind('end', () => {
       this.shuttingDown = true
       this._releaseToken()
@@ -141,6 +149,23 @@ class ReactiveController {
     try {
       this.bot.on(event, listener)
     } catch {}
+  }
+
+  _resolvePlayerEntity (source) {
+    if (!source) return null
+    if (source.type === 'player' && source.position && source.isValid !== false) return source
+    const username = String(source.username || source.name || '')
+    if (!username) return null
+    try {
+      const player = this.bot.players && this.bot.players[username]
+      const entity = player && player.entity
+      if (entity && entity.position && entity.isValid !== false) return entity
+    } catch {}
+    for (const entity of Object.values(this.bot.entities || {})) {
+      if (!entity || entity.type !== 'player') continue
+      if (String(entity.username || entity.name || '') === username) return entity
+    }
+    return null
   }
 
   _ensureToken (reason) {
@@ -381,6 +406,23 @@ class ReactiveController {
       threat = nearestHostile(this.bot, enterRadius)
     }
 
+    // If a player hit us, fight back even when no hostile mob is nearby. This
+    // uses the same engage path below and keeps a generous window so a normal
+    // PvP exchange does not expire before the bot can turn around.
+    const playerRetaliationWindow = Number.isFinite(this.cfg.playerRetaliationWindowMs)
+      ? Math.max(5000, this.cfg.playerRetaliationWindowMs)
+      : 120000
+    if (!threat && this._lastPlayerAttacker && now - this._playerAttackedAt < playerRetaliationWindow) {
+      const attacker = this._resolvePlayerEntity(this._lastPlayerAttacker) || this._lastPlayerAttacker
+      if (attacker && attacker.position && attacker.isValid !== false && Number.isFinite(attacker.position.distanceTo(this.bot.entity.position))) {
+        const dist = attacker.position.distanceTo(this.bot.entity.position)
+        const radius = this.cfg.hostileExitRadius ?? ((this.cfg.hostileScanRadius ?? 16) + 8)
+        if (dist < radius) {
+          threat = { entity: attacker, distance: dist, threats: [{ entity: attacker, distance: dist }], playerAttacker: true }
+        }
+      }
+    }
+
     if (!threat) {
       if (this.state === STATE.FLEEING || this.state === STATE.ENGAGING) {
         if (this._exitClearSince === 0) this._exitClearSince = now
@@ -397,9 +439,15 @@ class ReactiveController {
     this._exitClearSince = 0
     const health = this.bot.health ?? 20
     const lowHealth = health <= (this.cfg.lowHealthFleeThreshold ?? 8)
+    const playerRetaliation = !!threat.playerAttacker && now - this._playerAttackedAt < playerRetaliationWindow
+
+
+
 
     // User preference: only flee when low health AND we can verify an escape path.
-    if (lowHealth) {
+    // Exception: a player who hit us is answered in kind instead of ignored while
+    // running away, because the user explicitly wants the bot to retaliate.
+    if (lowHealth && !playerRetaliation) {
       if (this.state === STATE.FLEEING && this._fleeingFrom && this._fleeingFrom.id === threat.entity.id) {
         if (this._shouldRepathFlee(threat) || this._shouldRepathCloseFlee(threat, now)) {
           this._lastCloseFleeRepathAt = now
@@ -421,8 +469,11 @@ class ReactiveController {
     // Fight when explicitly configured, or when we recently took damage and are
     // capable of fighting the specific threat. Ranged/explosive threats never
     // trigger a melee rush; they get a shield/strafe defense instead.
-    const recentlyAttacked = now - this._lastDamagedAt < (this.cfg.defendWhenAttackedWindowMs ?? 2000)
+    const recentlyAttacked = now - this._lastDamagedAt < (this.cfg.defendWhenAttackedWindowMs ?? 2000) || playerRetaliation
     const wantEngage = this.cfg.engageOverFlee === true || recentlyAttacked
+    if (playerRetaliation && this.state !== STATE.ENGAGING) {
+      this._prepareCombatLoadout(now)
+    }
     if (wantEngage) {
       if (this._canEngage(threat)) {
         if (this.state !== STATE.ENGAGING) {
@@ -442,6 +493,7 @@ class ReactiveController {
 
   _canEngage (threat) {
     if (!threat?.entity) return false
+    if (threat.playerAttacker) return true
     const name = String(threat.entity.name || '')
     if (RANGED_HOSTILE_NAMES.has(name) || NO_MELEE_HOSTILE_NAMES.has(name)) return false
     const threatCount = Array.isArray(threat.threats) && threat.threats.length ? threat.threats.length : 1
@@ -635,8 +687,7 @@ class ReactiveController {
     this._autoEatAt = now
     ;(async () => {
       try {
-        await this.bot.equip(food, 'hand')
-        await this.bot.consume()
+        await combat.consumePreserveLoadout(this.bot, food)
         this.bot.emit('reactive:log', { level: 'info', message: `自动进食 ${food.displayName || food.name}` })
       } catch (err) {
         this.bot.emit('reactive:log', { level: 'warn', message: `自动进食失败: ${err.message || err}` })
