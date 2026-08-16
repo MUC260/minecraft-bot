@@ -1,3 +1,4 @@
+const path = require('path')
 const config = require('./lib/config')
 const logger = require('./lib/logger')
 const BotAgent = require('./core/agent')
@@ -11,7 +12,10 @@ async function main () {
   logger.info('Minecraft AI Bot 框架启动中...')
 
   const agent = new BotAgent(config).start()
-  const brain = new Brain(agent, config.ai)
+  const brain = new Brain(agent, {
+    ...config.ai,
+    memoryFile: config.ai.memoryFile || path.join(config.root, 'logs', 'brain-memory.json')
+  })
   const commander = new ChatCommander(agent, brain, config)
 
   logger.on('log', (item) => agent.emit('log', item))

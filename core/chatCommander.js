@@ -63,6 +63,7 @@ class ChatCommander {
     this.config = config
     this.mc = (config && (config.mc || config)) || {}
     this.ownerNames = this._ownerNames(this.mc.ownerName)
+    this._lastCommandAt = new Map()
     this.aiCommands = this.mc.aiCommands !== false
     this.commandPrefix = this.mc.commandPrefix == null ? '!' : String(this.mc.commandPrefix)
     this.agent.on('chat', (item) => this.onChat(item))
@@ -105,6 +106,19 @@ class ChatCommander {
     const command = this._commandText(raw)
     if (!command) return
 
+    // The same owner chat event can arrive more than once from game/UI relays.
+    const dedupeKey = String(item.username || '').toLowerCase() + '\u0000' + raw
+    const now = Date.now()
+    const last = this._lastCommandAt.get(dedupeKey) || 0
+    if (now - last < 1500) return
+    this._lastCommandAt.set(dedupeKey, now)
+    if (this._lastCommandAt.size > 200) {
+      const cutoff = now - 60000
+      for (const [key, ts] of this._lastCommandAt) {
+        if (ts < cutoff) this._lastCommandAt.delete(key)
+      }
+    }
+
     const parsed = this.parse(command, item.username)
     if (!parsed) return
 
@@ -130,8 +144,18 @@ class ChatCommander {
     if (executor.currentCall) executor.requestCurrentSkillAbort('user command')
 
     const call = { name: action.name, args: action.args || {} }
+    if (this.brain && typeof this.brain.alignPlanToAction === 'function') {
+      this.brain.alignPlanToAction(call)
+    }
+    const remember = (name, args) => {
+      if (this.brain && typeof this.brain.recordAction === 'function') {
+        this.brain.recordAction({ name, args: args || {} })
+      }
+    }
+
     if (call.name === 'stop') {
       this.brain.setHold(true)
+      remember('stop', call.args)
       executor.enqueue({ ...call, timeoutMs: 5000 })
       return
     }
@@ -140,14 +164,17 @@ class ChatCommander {
       const username = String(call.args.username || '').trim()
       if (!username) return
       this.brain.setFollow(username, Number(call.args.distance || 2))
-      executor.enqueue({ ...call, timeoutMs: 110000 })
+      remember('follow', call.args)
+      executor.enqueue({ ...call, timeoutMs: 86400000 })
       return
     }
 
     if (call.name === 'goto' && call.args.username) {
       const username = String(call.args.username || '').trim()
-      this.brain.setFollow(username, Number(call.args.distance || 2))
-      executor.enqueue({ name: 'follow', args: { username, distance: Number(call.args.distance || 2) }, timeoutMs: 110000 })
+      const distance = Number(call.args.distance || 2)
+      this.brain.setFollow(username, distance)
+      remember('follow', { username, distance })
+      executor.enqueue({ name: 'follow', args: { username, distance }, timeoutMs: 86400000 })
       return
     }
 
@@ -155,6 +182,7 @@ class ChatCommander {
     // One-shot commands return to normal autonomous behavior after finishing.
     // Only the explicit stop/standby command parks the bot indefinitely.
     this.brain.setHold(false)
+    remember(call.name, call.args)
     const longBuild = ['buildHouse', 'buildTower', 'buildBridge', 'buildWall'].includes(call.name)
     executor.enqueue({ ...call, timeoutMs: longBuild ? 240000 : undefined })
   }

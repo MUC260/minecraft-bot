@@ -1,4 +1,4 @@
-﻿const { Vec3 } = require('vec3')
+const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const observations = require('./observations')
 const combat = require('../lib/combat')
@@ -1494,7 +1494,7 @@ const handlers = {
 
   follow: async (bot, args, ctx) => {
     const username = String(args.username || '').trim()
-    if (!username) throw new Error('follow ??????')
+    if (!username) throw new Error('follow 需要 username')
     const distance = clampInt(args.distance, 1, 8, 2)
     const durationMs = clampInt(args.durationMs, 1000, 86400000, 86400000)
 
@@ -1506,7 +1506,7 @@ const handlers = {
       await sleep(500, ctx)
       player = findPlayer(bot, username)
     }
-    if (!player || !player.entity) throw new Error('?????: ' + username)
+    if (!player || !player.entity) throw new Error('找不到玩家: ' + username)
 
     const acquired = acquirePathfinder(bot, ctx, 'follow')
     if (!acquired.ok) return { preempted: acquired.preempted, reason: acquired.reason }
@@ -1529,16 +1529,16 @@ const handlers = {
         if (lastTargetId !== target.id || (dist > distance + 1 && idle)) {
           const goal = new goals.GoalFollow(target, distance)
           const installed = setPathfinderGoal(bot, acq, goal, { dynamic: true })
-          if (!installed.ok) throw new Error(installed.reason || '?????????')
+          if (!installed.ok) throw new Error(installed.reason || '无法设置跟随目标')
           lastTargetId = target.id
         }
         await sleep(400, ctx)
       }
-      return '????? ' + username
+      return '正在跟随 ' + username
     } catch (err) {
       const reason = ctx && ctx.signal ? ctx.signal.reason : ''
       if (reason === 'reactive-preempt') {
-        return { preempted: true, reason: 'reactive ?? follow' }
+        return { preempted: true, reason: 'reactive 中断 follow' }
       }
       throw err
     } finally {

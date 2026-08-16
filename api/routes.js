@@ -1,4 +1,4 @@
-﻿const express = require('express')
+const express = require('express')
 const logger = require('../lib/logger')
 const { listModels } = require('../ai/provider')
 
@@ -106,6 +106,24 @@ module.exports = function createRouter (agent, brain, config) {
     res.json({ ok: true, goal })
   })
 
+  router.get('/ai/memory', (req, res) => {
+    try {
+      res.json({ ok: true, memory: brain.getMemory ? brain.getMemory() : null })
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message })
+    }
+  })
+
+  router.post('/ai/memory/reset', (req, res) => {
+    try {
+      const memory = brain.resetMemory ? brain.resetMemory() : null
+      notify()
+      res.json({ ok: true, memory })
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message })
+    }
+  })
+
   router.post('/ai/tick', async (req, res) => {
     try {
       await brain.tick()
@@ -121,6 +139,8 @@ module.exports = function createRouter (agent, brain, config) {
     status.aiEnabled = config.ai.enabled && !!config.ai.apiKey
     status.lastError = brain.lastError || null
     status.goal = brain.goal
+    status.plan = brain.plan || null
+    status.memory = brain.getMemory ? brain.getMemory() : null
     return status
   }
 
