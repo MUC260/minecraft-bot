@@ -149,6 +149,16 @@ function lowerBlockName (block) {
   return String(block && block.name ? block.name : '').toLowerCase()
 }
 
+function blockVisible (bot, block) {
+  try {
+    if (!bot || !block) return false
+    if (typeof bot.canSeeBlock === 'function') return !!bot.canSeeBlock(block)
+    return true
+  } catch {
+    return true
+  }
+}
+
 function bkey (pos) {
   return `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`
 }
@@ -188,13 +198,18 @@ function findNearestBlockBy (bot, predicate, radius = 12, count = 128) {
   }
   if (!positions || !positions.length) return null
   let best = null
+  let bestVisible = null
   for (const pos of positions) {
     const block = bot.blockAt(pos)
     if (!block) continue
     const dist = bot.entity.position.distanceTo(block.position)
+    const visible = blockVisible(bot, block)
+    if (visible) {
+      if (!bestVisible || dist < bestVisible.distance) bestVisible = { block, distance: dist }
+    }
     if (!best || dist < best.distance) best = { block, distance: dist }
   }
-  return best ? best.block : null
+  return (bestVisible || best || {}).block || null
 }
 
 function findNearestHostile (bot, radius = 16) {
@@ -699,6 +714,12 @@ async function digConnected (bot, start, predicate, ctx, limit = 64) {
       const nav = await pathNearXZ(bot, ctx, block.position.x, block.position.z, 2.5, 45000)
       if (nav && nav.preempted) return { preempted: true, reason: nav.reason || 'reactive preempt' }
       if (nav && !nav.ok) throw new Error(nav.reason || 'unable to reach target block')
+    }
+
+    if (!blockVisible(bot, block)) {
+      try { await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true) } catch {}
+      await sleep(150, ctx)
+      if (!blockVisible(bot, block)) continue
     }
 
     await raceWithAbort(bot.dig(block, true), ctx, () => {
@@ -1590,6 +1611,11 @@ const handlers = {
         if (nav && nav.preempted) return nav
         if (nav && !nav.ok) throw new Error(nav.reason || '无法到达目标方块')
       }
+      if (!blockVisible(bot, block)) {
+        try { await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true) } catch {}
+        await sleep(150, ctx)
+        if (!blockVisible(bot, block)) throw new Error('目标方块不可见，无法采集')
+      }
       try { await combat.equipBestToolForBlock(bot, block.name) } catch {}
       await raceWithAbort(bot.dig(block, true), ctx, () => {
         if (typeof bot.stopDigging === 'function') bot.stopDigging()
@@ -1625,6 +1651,7 @@ const handlers = {
     } catch {}
     const result = await digConnected(bot, block.position, predicate, ctx, maxBlocks)
     if (result.preempted) return result
+    if (result.dug === 0) throw new Error('没有挖到可见的矿石，需要先靠近或换个位置')
     const picked = await pickupNearbyDrops(bot, ctx, radius)
     if (picked && picked.preempted) return picked
     return `采矿完成：${block.name} 共 ${result.dug} 块，并已拾取附近掉落物`

@@ -4,6 +4,7 @@
 - 项目路径：`D:\minecraft-bot`
 - GitHub：`https://github.com/MUC260/minecraft-bot`（当前为公开仓库）
 - 协作者：`BCZZB`
+- 最新本地提交：`9a088f6 fix: avoid unreachable mining and add task supervisor command prefix`
 - 最新已推送提交：`9ccc124 fix: make collect autonomous and improve AI action planning`
 - 当前分支：`main`
 - 当前状态：本地工作树有未提交修改（见下方“未提交的工作树改动”），已通过 `npm run check` 和 `npm test`
@@ -49,6 +50,9 @@
 - 被玩家打会还手：`core/reactive.js` 新增 `_resolvePlayerEntity`，反击窗口提升到 120 秒，低血量时先装备武器/盾牌再反击，不逃跑。
 - 自动进食不丢副手盾牌：`lib/combat.js` 的 `consumePreserveLoadout` 保存/恢复手持物与副手盾牌。
 - UI 主人命令重复显示：`ui/app.js` 对聊天和事件日志按键去重，历史日志加载前清空事件去重集合。
+- 禁止隔空挖矿：`core/actions.js` 的 `blockVisible`/`findNearestBlockBy`/`digConnected`/`collect`/`mineOreVein` 在挖掘前先检查 `bot.canSeeBlock`，不可见就靠近或放弃。
+- 主人命令加前缀：`core/chatCommander.js` 默认只处理 `!` / `！` 开头的聊天，普通聊天不再逐条分析；`lib/config.js`/`config.example.json`/`ui/app.js` 增加 `mc.commandPrefix`。
+- AI 监工持续任务：`ai/prompts/system.md` 增加监工/长期目标/失败换路/不可隔空挖矿约束；停止词扩展到完成/好了/可以了/结束/完毕/done/complete/finish。
 
 ### 历史提交 `9ccc124` 修复了用户反馈的主要问题：
 1. `bot.pathfinderOwner` 未挂到 bot 实例，导致采集/寻路技能报“pathfinderOwner 未初始化”。

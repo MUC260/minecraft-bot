@@ -15,7 +15,8 @@
         "pluginLoginCommands": "/login {password}",
         "pluginRegisterCommands": "",
         "pluginAuthDelayMs": 1500,
-        "aiCommands": true
+        "aiCommands": true,
+        "commandPrefix": "!"
     },
     "ai": {
         "enabled": true,

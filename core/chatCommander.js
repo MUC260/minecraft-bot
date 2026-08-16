@@ -64,7 +64,20 @@ class ChatCommander {
     this.mc = (config && (config.mc || config)) || {}
     this.ownerNames = this._ownerNames(this.mc.ownerName)
     this.aiCommands = this.mc.aiCommands !== false
+    this.commandPrefix = this.mc.commandPrefix == null ? '!' : String(this.mc.commandPrefix)
     this.agent.on('chat', (item) => this.onChat(item))
+  }
+
+  _commandText (raw) {
+    const text = String(raw || '').trim()
+    if (!text) return null
+    const prefix = this.commandPrefix == null ? '' : String(this.commandPrefix)
+    if (!prefix) return text
+    const norm = (ch) => ch === '！' ? '!' : ch
+    const accepted = new Set(Array.from(prefix).map(norm))
+    if (!accepted.has(norm(text.charAt(0)))) return null
+    const command = text.slice(1).trim()
+    return command || null
   }
 
   _ownerNames (value) {
@@ -89,8 +102,10 @@ class ChatCommander {
     if (!this.isOwner(item.username)) return
     const raw = String(item.message || '').trim()
     if (!raw) return
+    const command = this._commandText(raw)
+    if (!command) return
 
-    const parsed = this.parse(raw, item.username)
+    const parsed = this.parse(command, item.username)
     if (!parsed) return
 
     item.handled = true
@@ -149,21 +164,28 @@ class ChatCommander {
     const normalized = normalize(raw)
     if (!text) return null
 
+    if (/^(停止|停下|站住|别动|不要动|别乱动|站住别动|原地待命|待机|stop|done|complete|finish)/.test(text) || /^(完成|完成了|好了|可以了|结束|完毕)$/.test(text)) {
+      return {
+        action: { name: 'stop', args: {} },
+        goal: '停止当前动作，原地待命。'
+      }
+    }
+
     if (/砍(树|木头|木)|伐木|chop|choptree|chopwood|cutwood/.test(text)) {
       return {
         action: { name: 'chopTree', args: {} },
-        goal: '去附近砍树，砍完原地待命等下一句指令。'
+        goal: '持续寻找并砍伐树木，收集木材，直到我说停止或完成。'
       }
     }
 
     if (/挖(矿|石头|矿石)|采矿|下矿|mine|mineore|minestone/.test(text)) {
       return {
         action: { name: 'mineOreVein', args: {} },
-        goal: '去附近采矿，采完原地待命等下一句指令。'
+        goal: '持续寻找并开采矿石，直到我说停止或完成。'
       }
     }
 
-    if (/停止|停下|站住|别动|不要动|别乱动|站住别动|原地待命|待机|stop/.test(text)) {
+    if (/^(停止|停下|站住|别动|不要动|别乱动|站住别动|原地待命|待机|stop|done|complete|finish)/.test(text) || /^(完成|完成了|好了|可以了|结束|完毕)$/.test(text)) {
       return {
         action: { name: 'stop', args: {} },
         goal: '停止当前动作，原地待命。'
@@ -173,7 +195,7 @@ class ChatCommander {
     if (/捡|拾取|收集|捡东西|捡掉落|拾起|捡起来|捡物品|collect|pickup|pickupitems|collectitems/.test(text)) {
       return {
         action: { name: 'collect', args: { radius: 12 } },
-        goal: '去捡起附近掉落物，捡完原地待命。'
+        goal: '持续拾取附近掉落物和可采集物，直到我说停止或完成。'
       }
     }
 
@@ -227,7 +249,7 @@ class ChatCommander {
       if (oreName) {
         return {
           action: { name: 'mineOreVein', args: { name: oreName } },
-          goal: '去挖 ' + oreMatch[1] + ' 矿，挖完原地待命。'
+          goal: '持续寻找并开采 ' + oreMatch[1] + ' 矿，直到我说停止或完成。'
         }
       }
     }
@@ -273,7 +295,7 @@ class ChatCommander {
       }
     }
 
-    // Anything else the owner says becomes a temporary AI goal.
+    // Anything else with the command prefix becomes an AI goal.
     return { goal: '主人指令：' + raw }
   }
 }
