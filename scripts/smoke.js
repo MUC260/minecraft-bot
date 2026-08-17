@@ -62,6 +62,18 @@ function mockBotForReactive () {
   brain.destroy()
 }
 
+// 2a. AI request failures back off instead of hammering the provider every tick.
+{
+  const executor = new EventEmitter()
+  const agent = { executor, connected: true, snapshot () { return {} }, emit () {} }
+  const brain = new Brain(agent, { intervalMs: 1500 })
+  brain.aiErrorStreak = 1
+  assert.strictEqual(brain._setAiBackoff(new Error('AI API 429: rate limit')), 30000, 'rate limits should wait at least 30 seconds')
+  brain.aiErrorStreak = 1
+  assert.strictEqual(brain._setAiBackoff(new Error('request timed out')), 10000, 'timeouts should wait at least 10 seconds')
+  brain.destroy()
+}
+
 // 2b. Brain offline fallback keeps the bot busy when no valid API key is configured.
 {
   const executor = new EventEmitter()

@@ -26,6 +26,7 @@ class Brain {
     this.holdPosition = false
     this.followTarget = null
     this.aiErrorStreak = 0
+    this.aiBackoffMs = 0
     this._offlineStep = 0
     this.history = []
     this._pendingAssistant = null
@@ -267,7 +268,18 @@ class Brain {
   }
 
   _scheduleNext () {
-    this._kick(this.config.intervalMs || 1500)
+    const intervalMs = Math.max(1000, Number(this.config.intervalMs) || 4000)
+    this._kick(Math.max(intervalMs, this.aiBackoffMs || 0))
+  }
+
+  _setAiBackoff (error) {
+    const message = String(error && error.message ? error.message : error || '')
+    const isRateLimited = /\b429\b|rate limit|限流/i.test(message)
+    const isTimeout = /timeout|timed out|aborted|超时/i.test(message)
+    const baseMs = isRateLimited ? 30000 : (isTimeout ? 10000 : 5000)
+    const multiplier = Math.min(Math.max(this.aiErrorStreak - 1, 0), 3)
+    this.aiBackoffMs = Math.min(baseMs * (2 ** multiplier), 120000)
+    return this.aiBackoffMs
   }
 
   _hasValidApiKey () {
@@ -682,17 +694,17 @@ class Brain {
       let actions = this._normalizeActions(parseActions(data))
       if (!actions.length) actions = [{ name: 'explore', args: {} }]
       this.aiErrorStreak = 0
+      this.aiBackoffMs = 0
       this._dispatchPlan(actions, snapshot)
     } catch (e) {
       this.lastError = e.message
       this.aiErrorStreak++
-      logger.warn('AI 决策失败:', e.message)
-      this.agent.emit('log', { level: 'warn', message: 'AI 决策失败: ' + e.message })
+      const backoffMs = this._setAiBackoff(e)
+      logger.warn(`AI 决策失败，${Math.ceil(backoffMs / 1000)} 秒后重试:`, e.message)
+      this.agent.emit('log', { level: 'warn', message: `AI 决策失败，${Math.ceil(backoffMs / 1000)} 秒后重试: ${e.message}` })
       if (this.aiErrorStreak >= 3 && !this.holdPosition && !this.followTarget) {
         const snapshot = this.agent.snapshot()
-        const fallback = this._offlineActions(snapshot)
-        this._dispatchPlan(fallback, snapshot)
-        this.aiErrorStreak = 0
+        this._dispatchPlan(this._offlineActions(snapshot), snapshot)
       }
     } finally {
       this.ticking = false

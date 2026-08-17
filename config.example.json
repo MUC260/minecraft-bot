@@ -27,7 +27,7 @@
         "model": "gpt-4o-mini",
         "temperature": 0.2,
         "maxTokens": 1200,
-        "intervalMs": 1500,
+        "intervalMs": 4000,
         "planAhead": true,
         "memoryFile": "",
         "memoryMaxMessages": 40,
