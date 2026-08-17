@@ -93,12 +93,11 @@ function isDroppedItemEntity (bot, entity) {
   }
   const name = String(entity.name || '').toLowerCase()
   const type = String(entity.type || '').toLowerCase()
-  const objectType = String(entity.objectType || '').toLowerCase()
-  if (objectType === 'item') return true
+  const displayName = String(entity.displayName || '').toLowerCase()
   if (name === 'item' || name === 'item_stack') return true
-  // Older mineflayer versions may only expose type="object" without objectType.
-  // Keep this as a last-resort fallback, but prefer the canonical check above.
-  if (type === 'object' && !objectType) return true
+  // objectType is deprecated in prismarine-entity and prints a stack trace on
+  // every read. Older object entities can still be recognized by displayName.
+  if (type === 'object' && (displayName === 'item' || displayName === 'item stack')) return true
   return false
 }
 
@@ -159,6 +158,80 @@ function blockVisible (bot, block) {
   }
 }
 
+function firstSolidBlockToward (bot, targetPosition, maxDistance = 4.5) {
+  if (!bot.entity || !targetPosition) return null
+  const eye = bot.entity.position.offset(0, 1.62, 0)
+  const delta = targetPosition.minus(eye)
+  const length = Math.sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z)
+  if (!Number.isFinite(length) || length <= 0.01) return null
+  const limit = Math.min(maxDistance, length)
+  const seen = new Set()
+  for (let d = 0.35; d <= limit; d += 0.2) {
+    const pos = new Vec3(
+      Math.floor(eye.x + delta.x / length * d),
+      Math.floor(eye.y + delta.y / length * d),
+      Math.floor(eye.z + delta.z / length * d)
+    )
+    const key = bkey(pos)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const block = bot.blockAt(pos)
+    if (!block || block.boundingBox === 'empty') continue
+    const n = lowerBlockName(block)
+    if (n === 'water' || n === 'lava' || n.endsWith('_water') || n.endsWith('_lava')) continue
+    return block
+  }
+  return null
+}
+
+async function exposeBlockSafely (bot, targetBlock, ctx, maxObstructions = 48) {
+  for (let i = 0; i < maxObstructions; i++) {
+    throwIfAborted(ctx)
+    if (blockVisible(bot, targetBlock)) return true
+    const center = targetBlock.position.offset(0.5, 0.5, 0.5)
+    try { await bot.lookAt(center, true) } catch {}
+    await sleep(100, ctx)
+    const obstruction = firstSolidBlockToward(bot, center, 4.5)
+    if (!obstruction || obstruction.boundingBox === 'empty') {
+      // The line is open but the target is still too far away. Advance through
+      // the tunnel that was just cleared, then continue from the new position.
+      const delta = center.minus(bot.entity.position)
+      const length = Math.max(0.001, Math.sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z))
+      const step = Math.min(3, Math.max(1, length - 2.5))
+      const waypoint = bot.entity.position.offset(delta.x / length * step, delta.y / length * step, delta.z / length * step)
+      const nav = await pathNear(bot, ctx, waypoint.x, waypoint.y, waypoint.z, 1.2, 15000)
+      if (nav && nav.preempted) return false
+      if (nav && !nav.ok) return false
+      continue
+    }
+    if (bkey(obstruction.position) === bkey(targetBlock.position)) return true
+    if (obstruction.diggable === false || obstruction.name === 'bedrock') return false
+    const oldDistance = bot.entity.position.distanceTo(targetBlock.position)
+    const clearedPosition = obstruction.position.clone()
+    try { await combat.equipBestToolForBlock(bot, obstruction.name) } catch {}
+    await raceWithAbort(bot.dig(obstruction, true), ctx, () => {
+      if (typeof bot.stopDigging === 'function') bot.stopDigging()
+    })
+    await sleep(120, ctx)
+
+    // Move into the newly opened space whenever the target is still outside
+    // normal digging reach. This creates a real tunnel/staircase instead of
+    // trying to mine through walls from several blocks away.
+    if (oldDistance > 4.2) {
+      // Give gravity a moment first. For downward mining the bot normally
+      // drops into the freshly opened block without needing pathfinder.
+      await sleep(650, ctx)
+      const afterGravity = bot.entity.position.distanceTo(targetBlock.position)
+      if (afterGravity < oldDistance - 0.25) continue
+
+      const nav = await pathNear(bot, ctx, clearedPosition.x + 0.5, clearedPosition.y, clearedPosition.z + 0.5, 0.55, 8000)
+      if (nav && nav.preempted) return false
+      if (nav && !nav.ok && bot.entity.position.distanceTo(targetBlock.position) >= oldDistance - 0.25) return false
+    }
+  }
+  return blockVisible(bot, targetBlock)
+}
+
 function bkey (pos) {
   return `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`
 }
@@ -171,6 +244,39 @@ function isLogLike (block) {
 function isOreLike (block) {
   const n = lowerBlockName(block)
   return n.endsWith('_ore') || n === 'ancient_debris'
+}
+
+function canonicalOreName (name) {
+  return String(name || '').toLowerCase().replace(/^deepslate_/, '')
+}
+
+function oreMatchesName (block, requestedName) {
+  const actual = lowerBlockName(block)
+  const requested = String(requestedName || '').toLowerCase()
+  if (!requested) return isOreLike(block)
+  return actual === requested || canonicalOreName(actual) === canonicalOreName(requested)
+}
+
+const ORE_DROP_NAMES = {
+  iron_ore: ['raw_iron', 'iron_ingot', 'iron_ore', 'deepslate_iron_ore'],
+  gold_ore: ['raw_gold', 'gold_ingot', 'gold_ore', 'deepslate_gold_ore'],
+  copper_ore: ['raw_copper', 'copper_ingot', 'copper_ore', 'deepslate_copper_ore'],
+  coal_ore: ['coal', 'coal_ore', 'deepslate_coal_ore'],
+  diamond_ore: ['diamond', 'diamond_ore', 'deepslate_diamond_ore'],
+  emerald_ore: ['emerald', 'emerald_ore', 'deepslate_emerald_ore'],
+  lapis_ore: ['lapis_lazuli', 'lapis_ore', 'deepslate_lapis_ore'],
+  redstone_ore: ['redstone', 'redstone_ore', 'deepslate_redstone_ore'],
+  nether_gold_ore: ['gold_nugget', 'nether_gold_ore'],
+  nether_quartz_ore: ['quartz', 'nether_quartz_ore'],
+  ancient_debris: ['ancient_debris']
+}
+
+function oreYieldCount (bot, requestedName) {
+  const canonical = canonicalOreName(requestedName)
+  const names = new Set(ORE_DROP_NAMES[canonical] || [requestedName, canonical])
+  return (bot.inventory?.items?.() || []).reduce((sum, item) => {
+    return names.has(String(item && item.name || '').toLowerCase()) ? sum + Number(item.count || 0) : sum
+  }, 0)
 }
 
 function isCollectibleLike (block) {
@@ -695,7 +801,7 @@ async function ensureBuildMaterial (bot, material, ctx, need) {
 }
 
 
-async function digConnected (bot, start, predicate, ctx, limit = 64) {
+async function digConnected (bot, start, predicate, ctx, limit = 64, options = {}) {
   const startPos = new Vec3(Math.floor(start.x), Math.floor(start.y), Math.floor(start.z))
   const seen = new Set()
   const queue = [startPos]
@@ -710,18 +816,26 @@ async function digConnected (bot, start, predicate, ctx, limit = 64) {
     if (!block || !predicate(block)) continue
 
     const dist = bot.entity.position.distanceTo(block.position)
-    if (dist > 3.5) {
-      const nav = await pathNearXZ(bot, ctx, block.position.x, block.position.z, 2.5, 45000)
+    if (dist > 3.5 && !(options.threeDimensional && !blockVisible(bot, block))) {
+      const nav = options.threeDimensional
+        ? await pathNear(bot, ctx, block.position.x, block.position.y, block.position.z, 2.5, 45000)
+        : await pathNearXZ(bot, ctx, block.position.x, block.position.z, 2.5, 45000)
       if (nav && nav.preempted) return { preempted: true, reason: nav.reason || 'reactive preempt' }
       if (nav && !nav.ok) throw new Error(nav.reason || 'unable to reach target block')
     }
 
     if (!blockVisible(bot, block)) {
-      try { await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true) } catch {}
-      await sleep(150, ctx)
-      if (!blockVisible(bot, block)) continue
+      const exposed = options.threeDimensional
+        ? await exposeBlockSafely(bot, block, ctx, 48)
+        : false
+      if (!exposed) {
+        try { await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true) } catch {}
+        await sleep(150, ctx)
+        if (!blockVisible(bot, block)) continue
+      }
     }
 
+    try { await combat.equipBestToolForBlock(bot, block.name) } catch {}
     await raceWithAbort(bot.dig(block, true), ctx, () => {
       if (typeof bot.stopDigging === 'function') bot.stopDigging()
     })
@@ -1326,8 +1440,8 @@ async function pathNearXZ (bot, ctx, x, z, range = 2.5, timeoutMs = 60000) {
     const r = await waitForGoal(bot, ctx, timeoutMs)
     if (r.kind === 'preempted') return { preempted: true, reason: 'reactive 抢占路径' }
     if (r.kind === 'reached') return { ok: true }
-    if (r.kind === 'noPath' || r.kind === 'timeout') throw new Error('寻路失败: ' + r.kind)
-    throw new Error('寻路未完成: ' + r.kind)
+    if (r.kind === 'noPath' || r.kind === 'timeout') return { ok: false, reason: '寻路失败: ' + r.kind }
+    return { ok: false, reason: '寻路未完成: ' + r.kind }
   } finally {
     acq.release()
   }
@@ -1345,8 +1459,8 @@ async function pathNear (bot, ctx, x, y, z, range = 1, timeoutMs = 60000) {
     const r = await waitForGoal(bot, ctx, timeoutMs)
     if (r.kind === 'preempted') return { preempted: true, reason: 'reactive 抢占路径' }
     if (r.kind === 'reached') return { ok: true }
-    if (r.kind === 'noPath' || r.kind === 'timeout') throw new Error('寻路失败: ' + r.kind)
-    throw new Error('寻路未完成: ' + r.kind)
+    if (r.kind === 'noPath' || r.kind === 'timeout') return { ok: false, reason: '寻路失败: ' + r.kind }
+    return { ok: false, reason: '寻路未完成: ' + r.kind }
   } finally {
     acq.release()
   }
@@ -1514,6 +1628,10 @@ const handlers = {
     try {
       const started = Date.now()
       let lastTargetId = null
+      let lastPosition = bot.entity.position.clone()
+      let lastProgressAt = Date.now()
+      let bestDistance = Infinity
+      let stalledReplans = 0
       while (Date.now() - started < durationMs) {
         throwIfAborted(ctx)
         const current = findPlayer(bot, username)
@@ -1525,13 +1643,30 @@ const handlers = {
         }
 
         const dist = bot.entity.position.distanceTo(target.position)
+        const moved = bot.entity.position.distanceTo(lastPosition)
+        if (moved >= 0.35 || dist < bestDistance - 0.5 || dist <= distance + 1) {
+          lastProgressAt = Date.now()
+          stalledReplans = 0
+          bestDistance = Math.min(bestDistance, dist)
+          lastPosition = bot.entity.position.clone()
+        }
+
         const idle = bot.pathfinderOwner ? bot.pathfinderOwner.isIdle() : true
-        if (lastTargetId !== target.id || (dist > distance + 1 && idle)) {
+        const stalled = dist > distance + 2 && Date.now() - lastProgressAt >= 12000
+        if (lastTargetId !== target.id || (dist > distance + 1 && idle) || stalled) {
+          if (stalled) {
+            stalledReplans++
+            bot.pathfinderOwner?.stop(acq.token)
+            lastProgressAt = Date.now()
+            lastPosition = bot.entity.position.clone()
+            bestDistance = dist
+          }
           const goal = new goals.GoalFollow(target, distance)
           const installed = setPathfinderGoal(bot, acq, goal, { dynamic: true })
           if (!installed.ok) throw new Error(installed.reason || '无法设置跟随目标')
           lastTargetId = target.id
         }
+        if (stalledReplans >= 4) throw new Error(`跟随被地形卡住，和 ${username} 相距 ${dist.toFixed(1)} 格，稍后自动重试`)
         await sleep(400, ctx)
       }
       return '正在跟随 ' + username
@@ -1640,21 +1775,69 @@ const handlers = {
 
   mineOreVein: async (bot, args, ctx) => {
     const name = String(args.name || '').toLowerCase()
-    const predicate = name ? block => lowerBlockName(block) === name : isOreLike
-    const radius = Math.max(4, Math.min(Number(args.radius ?? 12), 24))
-    const block = findNearestBlockBy(bot, predicate, radius, 128)
-    if (!block) throw new Error('附近没有可开采的矿石')
-    const maxBlocks = Math.max(1, Math.min(Number(args.max ?? 48), 96))
-    try {
-      const tool = await combat.equipBestToolForBlock(bot, block.name)
-      if (!tool) await ensureWoodenToolForBlock(bot, block.name, ctx)
-    } catch {}
-    const result = await digConnected(bot, block.position, predicate, ctx, maxBlocks)
-    if (result.preempted) return result
-    if (result.dug === 0) throw new Error('没有挖到可见的矿石，需要先靠近或换个位置')
-    const picked = await pickupNearbyDrops(bot, ctx, radius)
-    if (picked && picked.preempted) return picked
-    return `采矿完成：${block.name} 共 ${result.dug} 块，并已拾取附近掉落物`
+    const predicate = name ? block => oreMatchesName(block, name) : isOreLike
+    const radius = Math.max(4, Math.min(Number(args.radius ?? 20), 32))
+    const targetCountRaw = Number(args.targetCount ?? args.count)
+    const targetCount = Number.isFinite(targetCountRaw) && targetCountRaw > 0
+      ? Math.max(1, Math.min(Math.floor(targetCountRaw), 256))
+      : 0
+    const defaultMaxBlocks = targetCount ? Math.max(targetCount, targetCount * 2) : 48
+    const maxBlocks = Math.max(1, Math.min(Number(args.max ?? defaultMaxBlocks), 256))
+    const beforeYield = targetCount && name ? oreYieldCount(bot, name) : 0
+    let totalDug = 0
+    let searchesWithoutOre = 0
+
+    while (totalDug < maxBlocks) {
+      throwIfAborted(ctx)
+      if (targetCount && name && oreYieldCount(bot, name) - beforeYield >= targetCount) break
+
+      const block = findNearestBlockBy(bot, predicate, radius, 256)
+      if (!block) {
+        if (!targetCount || searchesWithoutOre >= 2) break
+        searchesWithoutOre++
+        const angle = Math.random() * Math.PI * 2
+        const distance = 5 + searchesWithoutOre * 3
+        const nav = await pathNearXZ(
+          bot,
+          ctx,
+          bot.entity.position.x + Math.sin(angle) * distance,
+          bot.entity.position.z + Math.cos(angle) * distance,
+          2,
+          45000
+        )
+        if (nav && nav.preempted) return nav
+        if (nav && !nav.ok) continue
+        continue
+      }
+
+      searchesWithoutOre = 0
+      try {
+        const tool = await combat.equipBestToolForBlock(bot, block.name)
+        if (!tool) await ensureWoodenToolForBlock(bot, block.name, ctx)
+      } catch {}
+      const remaining = Math.max(1, maxBlocks - totalDug)
+      const gained = targetCount && name ? Math.max(0, oreYieldCount(bot, name) - beforeYield) : 0
+      const needed = targetCount ? Math.max(1, targetCount - gained) : remaining
+      const batchLimit = Math.max(1, Math.min(remaining, needed))
+      const result = await digConnected(bot, block.position, predicate, ctx, batchLimit, { threeDimensional: true })
+      if (result.preempted) return result
+      totalDug += Number(result.dug || 0)
+      if (!result.dug) break
+      const picked = await pickupNearbyDrops(bot, ctx, radius)
+      if (picked && picked.preempted) return picked
+      if (!targetCount) break
+    }
+
+    const collected = targetCount && name ? Math.max(0, oreYieldCount(bot, name) - beforeYield) : totalDug
+    if (totalDug === 0) {
+      const label = name ? canonicalOreName(name) : '矿石'
+      throw new Error(`附近 ${radius} 格内没有可见的 ${label}，请先带我到矿洞或矿脉附近`)
+    }
+    if (targetCount && collected < targetCount) {
+      throw new Error(`已挖 ${totalDug} 块并拾取 ${collected}/${targetCount} 个目标矿物，附近暂时找不到更多`)
+    }
+    if (targetCount) return `采矿完成：已挖 ${totalDug} 块并拾取 ${collected}/${targetCount} 个目标矿物`
+    return `采矿完成：共挖掘 ${totalDug} 块，并已拾取附近掉落物`
   },
 
   hunt: async (bot, args, ctx) => {

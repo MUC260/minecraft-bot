@@ -34,12 +34,11 @@ function isDroppedItemEntity (entity) {
   }
   const name = String(entity.name || '').toLowerCase()
   const type = String(entity.type || '').toLowerCase()
-  const objectType = String(entity.objectType || '').toLowerCase()
-  if (objectType === 'item') return true
+  const displayName = String(entity.displayName || '').toLowerCase()
   if (name === 'item' || name === 'item_stack') return true
-  // Older mineflayer versions may only expose type="object" without objectType.
-  // Keep this as a last-resort fallback, but prefer the canonical check above.
-  if (type === 'object' && !objectType) return true
+  // objectType is deprecated in prismarine-entity and prints a stack trace on
+  // every read. Older object entities can still be recognized by displayName.
+  if (type === 'object' && (displayName === 'item' || displayName === 'item stack')) return true
   return false
 }
 

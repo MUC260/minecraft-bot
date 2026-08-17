@@ -25,6 +25,8 @@ class BotAgent extends EventEmitter {
     this._reconnectAttempts = 0
     this._lastEndReason = ''
     this._manualDisconnected = false
+    this._connectWatchdog = null
+    this._lastKnownVersion = String(this.mc.version || '').trim() || null
   }
 
   start () {
@@ -37,16 +39,27 @@ class BotAgent extends EventEmitter {
 
   _createBot () {
     const c = this.mc
-    logger.info(`连接 Minecraft ${c.host}:${c.port} (${c.username}, ${c.auth})`)
-    const bot = mineflayer.createBot({
-      host: c.host,
-      port: c.port,
-      username: c.username,
-      password: c.password || undefined,
-      auth: c.auth || 'offline',
-      version: c.version || undefined
-    })
+    const requestedVersion = String(c.version || this._lastKnownVersion || '').trim() || undefined
+    logger.info(`连接 Minecraft ${c.host}:${c.port} (${c.username}, ${c.auth}${requestedVersion ? `, ${requestedVersion}` : ', 自动版本'})`)
+    let bot
+    try {
+      bot = mineflayer.createBot({
+        host: c.host,
+        port: c.port,
+        username: c.username,
+        password: c.password || undefined,
+        auth: c.auth || 'offline',
+        version: requestedVersion,
+        checkTimeoutInterval: Math.max(10000, Number(c.connectTimeoutMs || 20000))
+      })
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err)
+      logger.error(`创建机器人连接失败: ${message}`)
+      this._scheduleReconnect('create-error:' + message)
+      return this
+    }
     this.bot = bot
+    this._armConnectWatchdog(bot)
     bot.chatBuffer = this.chatBuffer
     bot.loadPlugin(pathfinder)
 
@@ -69,6 +82,26 @@ class BotAgent extends EventEmitter {
     return this
   }
 
+  _clearConnectWatchdog () {
+    if (this._connectWatchdog) clearTimeout(this._connectWatchdog)
+    this._connectWatchdog = null
+  }
+
+  _armConnectWatchdog (bot) {
+    this._clearConnectWatchdog()
+    const timeoutMs = Math.max(10000, Number(this.mc.connectTimeoutMs || 20000))
+    this._connectWatchdog = setTimeout(() => {
+      this._connectWatchdog = null
+      if (this._stopping || this.bot !== bot || this.connected) return
+      const reason = `connect-timeout:${timeoutMs}ms`
+      logger.warn(`连接握手超时 ${this._connContext(bot)}，准备重试`)
+      this._lastEndReason = reason
+      this.emit('status', this.status(reason))
+      this._scheduleReconnect(reason)
+    }, timeoutMs)
+    this._connectWatchdog.unref?.()
+  }
+
   _connContext (bot) {
     const c = this.mc || {}
     const username = String(bot && bot.username ? bot.username : (c.username || '')).trim() || '?'
@@ -81,7 +114,13 @@ class BotAgent extends EventEmitter {
     bot.once('spawn', () => {
       if (this.bot !== bot) return
       this.connected = true
+      this._clearConnectWatchdog()
+      if (this._reconnectTimer) {
+        clearTimeout(this._reconnectTimer)
+        this._reconnectTimer = null
+      }
       this._reconnectAttempts = 0
+      if (bot.version) this._lastKnownVersion = String(bot.version)
       try {
         const mcData = require('minecraft-data')(bot.version)
         this.movements = new Movements(bot, mcData)
@@ -135,6 +174,7 @@ class BotAgent extends EventEmitter {
       if (this.bot !== bot) return
       const text = String(reason)
       this.connected = false
+      this._clearConnectWatchdog()
       this._lastEndReason = text
       logger.warn(`被踢出: ${text} ${this._connContext(bot)}`)
       this.emit('status', this.status(text))
@@ -145,6 +185,7 @@ class BotAgent extends EventEmitter {
       if (this.bot !== bot) return
       const text = String(reason)
       this.connected = false
+      this._clearConnectWatchdog()
       this._lastEndReason = text
       logger.warn(`连接断开: ${text} ${this._connContext(bot)}`)
       this.emit('status', this.status(text))
@@ -153,12 +194,19 @@ class BotAgent extends EventEmitter {
 
     bot.on('error', (err) => {
       if (this.bot !== bot) return
-      logger.error(`机器人错误: ${err && err.message ? err.message : err} ${this._connContext(bot)}`)
+      const message = err && err.message ? err.message : String(err)
+      logger.error(`机器人错误: ${message} ${this._connContext(bot)}`)
+      if (!this.connected) {
+        this._clearConnectWatchdog()
+        this._lastEndReason = 'connect-error:' + message
+        this._scheduleReconnect(this._lastEndReason)
+      }
     })
 
     bot.on('death', () => {
       if (this.bot !== bot) return
-      this.emit('log', { level: 'warn', message: '角色死亡' })
+      logger.warn(`角色死亡，等待服务器重生 ${this._connContext(bot)}`)
+      this.emit('log', { level: 'warn', message: '角色死亡，等待自动重生' })
     })
     bot.on('reactive:state', (t) => this.emit('reactiveState', t))
     bot.on('reactive:log', (item) => this.emit('log', item))
@@ -213,8 +261,8 @@ class BotAgent extends EventEmitter {
       return
     }
 
-    const base = Math.max(500, Number(c.reconnectBaseDelayMs ?? 3000))
-    const max = Math.max(base, Number(c.reconnectMaxDelayMs ?? 60000))
+    const base = Math.max(500, Number(c.reconnectBaseDelayMs ?? 2000))
+    const max = Math.max(base, Number(c.reconnectMaxDelayMs ?? 15000))
     const delay = Math.min(max, base * Math.pow(2, this._reconnectAttempts))
     this._reconnectAttempts++
 
@@ -222,7 +270,7 @@ class BotAgent extends EventEmitter {
     this.emit('log', { level: 'warn', message: `${delay}ms 后尝试重连 (${this._reconnectAttempts})` })
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null
-      if (this._stopping) return
+      if (this._stopping || this.connected) return
       this._clearCurrentBot()
       this._createBot()
     }, delay)
@@ -260,11 +308,13 @@ class BotAgent extends EventEmitter {
   }
 
   _clearCurrentBot () {
+    this._clearConnectWatchdog()
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer)
       this._reconnectTimer = null
     }
     if (this.executor) {
+      try { this.executor.requestCurrentSkillAbort('connection-reset') } catch {}
       try { this.executor.clear() } catch {}
       try { this.executor.destroy() } catch {}
       this.executor = null
