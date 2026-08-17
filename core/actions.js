@@ -635,7 +635,9 @@ function kindForBlockName (blockName) {
   const n = String(blockName || '').toLowerCase()
   if (n.endsWith('_log') || n.endsWith('_stem') || n.endsWith('_hyphae') || n === 'mushroom_stem') return 'axe'
   if (n.endsWith('_ore') || n === 'ancient_debris') return 'pickaxe'
-  if (['dirt', 'grass_block', 'sand', 'gravel', 'clay', 'soul_sand'].includes(n)) return 'shovel'
+  // 与 lib/combat 的方块分类保持一致：石头类用镐，泥土/沙类用铲
+  if (combat.PICKAXE_BLOCKS && combat.PICKAXE_BLOCKS.has(n)) return 'pickaxe'
+  if (combat.SHOVEL_BLOCKS && combat.SHOVEL_BLOCKS.has(n)) return 'shovel'
   return null
 }
 

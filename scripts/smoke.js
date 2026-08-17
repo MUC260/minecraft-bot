@@ -122,6 +122,26 @@ function mockBotForReactive () {
   assert.strictEqual(worn[0].pct, 20, 'worn tool percent should be 20')
 }
 
+// 2a5. Tool selection skips nearly-broken tools and picks the best usable one.
+{
+  const combat = require('../lib/combat')
+  const brokenNetherite = { name: 'netherite_pickaxe', maxDurability: 2031, durabilityUsed: 2000, slot: 1 } // ~2%
+  const freshStone = { name: 'stone_pickaxe', maxDurability: 131, durabilityUsed: 0, slot: 2 }
+  const iron = { name: 'iron_pickaxe', maxDurability: 250, durabilityUsed: 5, slot: 3 }
+  // 挖铁矿石：铁镐应该是首选（下界合金镐快坏了被跳过）
+  const best = combat.toolForBlock('iron_ore', [brokenNetherite, iron, freshStone])
+  assert.strictEqual(best.name, 'iron_pickaxe', 'should prefer fresh iron over broken netherite')
+  // 挖石头（普通方块）也应匹配镐子
+  const stoneBest = combat.toolForBlock('stone', [freshStone, brokenNetherite])
+  assert.strictEqual(stoneBest.name, 'stone_pickaxe', 'plain stone should use a pickaxe')
+  // 泥土用铲子
+  const dirtBest = combat.toolForBlock('dirt', [{ name: 'stone_shovel', maxDurability: 131, durabilityUsed: 0, slot: 4 }])
+  assert.strictEqual(dirtBest.name, 'stone_shovel', 'dirt should use a shovel')
+  // 全部工具都坏时返回 null（空手）
+  const allBroken = combat.toolForBlock('iron_ore', [{ name: 'iron_pickaxe', maxDurability: 250, durabilityUsed: 250 }])
+  assert.strictEqual(allBroken, null, 'all broken tools should fall back to bare hands')
+}
+
 // 2b. Brain offline fallback keeps the bot busy when no valid API key is configured.
 {
   const executor = new EventEmitter()
