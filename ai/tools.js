@@ -1,4 +1,4 @@
-﻿const TOOLS = [
+const TOOLS = [
   { type: 'function', function: { name: 'chat', description: 'Send a message in Minecraft public chat', parameters: { type: 'object', properties: { message: { type: 'string', description: 'Message content' } }, required: ['message'] } } },
   { type: 'function', function: { name: 'look', description: 'Turn to a yaw/pitch', parameters: { type: 'object', properties: { yaw: { type: 'number' }, pitch: { type: 'number' } } } } },
   { type: 'function', function: { name: 'lookAt', description: 'Look at an entity or player', parameters: { type: 'object', properties: { username: { type: 'string' }, name: { type: 'string' } } } } },
@@ -24,6 +24,7 @@
   { type: 'function', function: { name: 'buildWall', description: 'Build a straight wall in front of the bot, running perpendicular to its facing', parameters: { type: 'object', properties: { length: { type: 'number', description: 'Wall length, default 8' }, height: { type: 'number', description: 'Wall height, default 3' }, direction: { type: 'string', enum: ['north', 'south', 'east', 'west'], description: 'Optional cardinal facing direction' }, material: { type: 'string', description: 'Optional block material' } } } } },
   { type: 'function', function: { name: 'craftPlanks', description: 'Chop trees if needed and craft enough wooden planks for building', parameters: { type: 'object', properties: { material: { type: 'string', description: 'Optional wood type, e.g. oak_planks, spruce_planks, oak_log' }, count: { type: 'number', description: 'Target number of planks, default 16' } } } } },
   { type: 'function', function: { name: 'inventory', description: '查看背包并报告物品、手持、护甲、武器和盾牌', parameters: { type: 'object', properties: { chat: { type: 'boolean', description: '是否在聊天中报告，默认 false' } } } } },
+  { type: 'function', function: { name: 'checkTools', description: '检查并丢弃耐久度低的工具（默认低于 30%），为制作新工具腾出背包空间', parameters: { type: 'object', properties: { threshold: { type: 'number', description: '耐久阈值百分比，默认 30' } } } } },
   { type: 'function', function: { name: 'craft', description: '制作指定物品，材料不足时会先采集木材', parameters: { type: 'object', properties: { name: { type: 'string', description: '物品 id 或别名，如 crafting_table, wooden_pickaxe' }, count: { type: 'number', description: '制作数量，默认 1' } }, required: ['name'] } } },
   { type: 'function', function: { name: 'craftGear', description: '自动制作基础木制工具、武器和皮革装备并自动装备', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'equip', description: 'Equip an item in the main hand', parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } } },

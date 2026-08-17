@@ -1,4 +1,4 @@
-﻿const combat = require('../lib/combat')
+const combat = require('../lib/combat')
 
 const HOSTILE_NAMES = new Set([
   'zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'enderman',
@@ -81,12 +81,23 @@ function entityInfo (bot, entity) {
 
 function inventoryInfo (bot) {
   try {
-    const items = bot.inventory.items().map(i => ({
-      name: i.name,
-      displayName: i.displayName || i.name,
-      count: i.count,
-      slot: i.slot
-    }))
+    const items = bot.inventory.items().map(i => {
+      const name = i.name
+      const maxDurability = Number(i.maxDurability) || 0
+      const durabilityUsed = Number.isFinite(i.durabilityUsed) ? Number(i.durabilityUsed) : null
+      return {
+        name,
+        displayName: i.displayName || i.name,
+        count: i.count,
+        slot: i.slot,
+        // 工具耐久度：只有有耐久上限的物品才带这两个字段
+        maxDurability: maxDurability > 0 ? maxDurability : undefined,
+        durabilityUsed: (maxDurability > 0 && durabilityUsed !== null) ? durabilityUsed : undefined,
+        durabilityPct: (maxDurability > 0 && durabilityUsed !== null)
+          ? Math.round(Math.max(0, 1 - durabilityUsed / maxDurability) * 100)
+          : undefined
+      }
+    })
     return {
       held: bot.heldItem ? { name: bot.heldItem.name, displayName: bot.heldItem.displayName || bot.heldItem.name, count: bot.heldItem.count } : null,
       items: items.slice(0, 36),

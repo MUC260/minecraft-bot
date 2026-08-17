@@ -729,7 +729,10 @@ async function pickupNearbyDrops (bot, ctx, radius = 8) {
 async function chopOneTree (bot, ctx, maxBlocks = 48, radius = 16) {
   const block = findNearestBlockBy(bot, isLogLike, radius, 128)
   if (!block) throw new Error('附近没有可砍的树木')
-  try { await combat.equipBestToolForBlock(bot, block.name) } catch {}
+  try {
+    const tool = await combat.equipBestToolForBlock(bot, block.name)
+    if (!tool) await ensureWoodenToolForBlock(bot, block.name, ctx)
+  } catch {}
   const result = await digConnected(bot, block.position, isLogLike, ctx, maxBlocks)
   if (result.preempted) return result
   const picked = await pickupNearbyDrops(bot, ctx)
@@ -2040,6 +2043,26 @@ const handlers = {
       }
     }
     return text
+  },
+
+  // 检查并替换耐久度低的工具：把低于阈值的工具丢弃，为后续 craftGear 腾出空间。
+  checkTools: async (bot, args) => {
+    const threshold = Math.max(1, Math.min(99, Number(args.threshold ?? 30)))
+    const items = bot.inventory.items().filter(i => i)
+    const worn = combat.wornTools(items, threshold)
+    if (!worn.length) return '工具耐久度正常'
+    const dropped = []
+    for (const entry of worn) {
+      const item = entry.item
+      try {
+        // 只丢弃非手持的工具，避免把手上的工具扔掉后反而无法继续。
+        if (bot.heldItem && bot.heldItem.slot === item.slot) continue
+        await bot.tossStack(item)
+        dropped.push(`${item.displayName || item.name}(${entry.pct}%)`)
+      } catch {}
+    }
+    if (!dropped.length) return `有 ${worn.length} 件低耐久工具，但都不可丢弃（可能正手持）`
+    return `已丢弃低耐久工具: ${dropped.join(', ')}`
   },
 
   craft: async (bot, args, ctx) => {

@@ -108,6 +108,20 @@ function mockBotForReactive () {
   brain.destroy()
 }
 
+// 2a4. Durability helpers work on prismarine-like items.
+{
+  const combat = require('../lib/combat')
+  const wornTool = { name: 'iron_pickaxe', maxDurability: 250, durabilityUsed: 200 }
+  const freshTool = { name: 'iron_pickaxe', maxDurability: 250, durabilityUsed: 10 }
+  const nonTool = { name: 'dirt', maxDurability: 0, durabilityUsed: null }
+  assert.strictEqual(combat.durabilityPercent(wornTool), 20, 'worn tool should report 20% durability')
+  assert.strictEqual(combat.durabilityPercent(freshTool), 96, 'fresh tool should report 96% durability')
+  assert.strictEqual(combat.durabilityPercent(nonTool), null, 'non-tool should report null durability')
+  const worn = combat.wornTools([wornTool, freshTool, nonTool], 30)
+  assert.strictEqual(worn.length, 1, 'only the worn tool should be flagged')
+  assert.strictEqual(worn[0].pct, 20, 'worn tool percent should be 20')
+}
+
 // 2b. Brain offline fallback keeps the bot busy when no valid API key is configured.
 {
   const executor = new EventEmitter()

@@ -650,6 +650,14 @@ class Brain {
     const drops = Array.isArray(state.nearbyDrops) ? state.nearbyDrops : []
     if (drops.length) return [{ name: 'collect', args: { radius: 8 } }]
 
+    // 工具保养：每 8 步检查一次低耐久工具，有则先丢弃
+    const invItems = (state.inventory && Array.isArray(state.inventory.items)) ? state.inventory.items : []
+    const wornTool = invItems.find(i => {
+      const pct = Number(i.durabilityPct)
+      return Number.isFinite(pct) && pct < 30
+    })
+    if (wornTool && this._offlineStep % 8 === 0) return [{ name: 'checkTools', args: { threshold: 30 } }]
+
     const build = this._offlineBuildPlan(state)
     if (build) return build
 
