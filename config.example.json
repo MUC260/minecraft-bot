@@ -40,7 +40,9 @@
     "logging": {
         "file": true,
         "dir": "logs",
-        "name": "agent.log"
+        "name": "agent.log",
+        "maxSizeBytes": 5242880,
+        "maxBackups": 3
     },
     "reactive": {
         "lowHealthFleeThreshold": 8,

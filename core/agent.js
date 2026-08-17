@@ -247,6 +247,27 @@ class BotAgent extends EventEmitter {
     }, delay)
   }
 
+  // 把断连/踢出原因归类，输出对用户更友好的提示。
+  _classifyDisconnect (reason) {
+    const text = String(reason || '')
+    if (/emergency:critical-health/.test(text)) {
+      return { type: 'emergency', hint: '紧急低血下线' }
+    }
+    if (/differentVersionError|incompatible|multiplayer\.disconnect\.incompatible/i.test(text)) {
+      return { type: 'version', hint: '服务器版本不匹配，请检查 MC_VERSION 配置' }
+    }
+    if (/ECONNREFUSED|connect ECONNREFUSED/.test(text)) {
+      return { type: 'server-offline', hint: '服务器未启动或拒绝连接（请确认 Aternos 服务器在线）' }
+    }
+    if (/ECONNRESET|socketClosed|socket closed/i.test(text)) {
+      return { type: 'server-closed', hint: '服务器关闭了连接（可能是 Aternos 休眠或服务器重启）' }
+    }
+    if (/timeout|ETIMEDOUT|timed out/i.test(text)) {
+      return { type: 'timeout', hint: '连接超时（网络或服务器繁忙）' }
+    }
+    return { type: 'unknown', hint: text ? ('原因: ' + text) : '未知原因' }
+  }
+
   _scheduleReconnect (reason) {
     if (this._stopping || this._reconnectTimer) return
     const c = this.mc
@@ -266,8 +287,9 @@ class BotAgent extends EventEmitter {
     const delay = Math.min(max, base * Math.pow(2, this._reconnectAttempts))
     this._reconnectAttempts++
 
-    logger.warn(`${delay}ms 后第 ${this._reconnectAttempts} 次重连...`)
-    this.emit('log', { level: 'warn', message: `${delay}ms 后尝试重连 (${this._reconnectAttempts})` })
+    const cls = this._classifyDisconnect(reason)
+    logger.warn(`[${cls.type}] ${cls.hint}，${delay}ms 后第 ${this._reconnectAttempts} 次重连...`)
+    this.emit('log', { level: 'warn', message: `${cls.hint}，${delay}ms 后尝试重连 (${this._reconnectAttempts})` })
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null
       if (this._stopping || this.connected) return
