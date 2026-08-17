@@ -74,6 +74,40 @@ function mockBotForReactive () {
   brain.destroy()
 }
 
+// 2a2. Plan steps record failures and auto-skip after the configured limit.
+{
+  const executor = new EventEmitter()
+  const agent = { executor, connected: true, snapshot () { return {} }, emit () {} }
+  const brain = new Brain(agent, { intervalMs: 1500, stepFailLimit: 2 })
+  brain.plan = brain._buildPlan('挖矿')
+  brain.plan.activeStep = 0
+  const step = brain.plan.steps[0]
+  assert.strictEqual(step.failures || 0, 0, 'fresh step should have no failures')
+  const first = brain._advancePlan({ name: 'inventory' }, { ok: false, reason: 'no path' })
+  assert.strictEqual(brain.plan.steps[0].failures, 1, 'first failure should be recorded')
+  assert.strictEqual(first, false, 'first failure should not advance yet')
+  const second = brain._advancePlan({ name: 'inventory' }, { ok: false, reason: 'no path' })
+  assert.strictEqual(brain.plan.steps[0].failures, 2, 'second failure should be recorded')
+  assert.strictEqual(second, true, 'step should auto-skip after failing limit')
+  assert.strictEqual(brain.plan.steps[0].done, true, 'failed step should be marked done (skip)')
+  assert.ok(brain.plan.steps[0].lastFailReason, 'fail reason should be recorded')
+  brain.destroy()
+}
+
+// 2a3. Survival priority short-circuits normal AI decisions when health is low.
+{
+  const executor = new EventEmitter()
+  const agent = { executor, connected: true, snapshot () { return {} }, emit () {} }
+  const brain = new Brain(agent, { intervalMs: 1500, apiKey: 'sk-valid' })
+  const lowHealth = brain._survivalPriority({ bot: { health: 3, food: 20 }, nearbyHostiles: [], inventory: { items: [] } })
+  assert.strictEqual(lowHealth[0].name, 'eat', 'low health should force eat')
+  const lowFood = brain._survivalPriority({ bot: { health: 20, food: 4 }, nearbyHostiles: [], inventory: { items: [] } })
+  assert.strictEqual(lowFood[0].name, 'eat', 'low food should force eat')
+  const normal = brain._survivalPriority({ bot: { health: 20, food: 20 }, nearbyHostiles: [], inventory: { items: [{ name: 'iron_sword', count: 1 }] } })
+  assert.strictEqual(normal, null, 'healthy bot should have no urgent action')
+  brain.destroy()
+}
+
 // 2b. Brain offline fallback keeps the bot busy when no valid API key is configured.
 {
   const executor = new EventEmitter()

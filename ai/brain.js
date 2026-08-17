@@ -525,7 +525,29 @@ class Brain {
     const step = plan.steps[idx]
     if (!step) return
 
-    if (!result || !result.ok || !call) return
+    // 失败也要记录：step.failures 累计失败次数，连续失败超过阈值则自动跳过换方案，
+    // 避免任务永远卡在同一动作上。
+    if (!result || !result.ok) {
+      step.failures = Number(step.failures || 0) + 1
+      step.lastFailReason = (result && result.reason) || (call ? ('动作 ' + call.name + ' 执行失败') : '执行失败')
+      step.updatedAt = Date.now()
+      const failLimit = Number(this.config.stepFailLimit) || 2
+      if (step.failures >= failLimit) {
+        logger.warn(`步骤 ${step.name} 连续失败 ${step.failures} 次，自动跳过换方案: ${step.lastFailReason}`)
+        this.agent.emit('log', { level: 'warn', message: `步骤 ${step.name} 连续失败，自动换方案` })
+        step.done = true
+        step.note = (step.note || '') + `连续失败 ${step.failures} 次（${step.lastFailReason}），自动跳过`
+        const advanced = this._advanceStep(plan, idx, 'fail')
+        plan.updatedAt = Date.now()
+        if (this.memory) this.memory.setPlan(plan)
+        this.agent.emit('aiPlan', { plan, at: Date.now() })
+        // 返回 true 提示上层本轮改走本地兜底，避免再次提交同一失败动作
+        return true
+      }
+      plan.updatedAt = Date.now()
+      if (this.memory) this.memory.setPlan(plan)
+      return false
+    }
 
     let target = -1
     if (step.name === call.name && !step.done) {
@@ -548,7 +570,7 @@ class Brain {
         }
       }
     }
-    if (target < 0) return
+    if (target < 0) return false
 
     for (let i = idx; i < target; i++) {
       const before = plan.steps[i]
@@ -561,11 +583,14 @@ class Brain {
     if (targetStep && !targetStep.done) {
       targetStep.done = true
       targetStep.note = (targetStep.note || '') + '已执行'
+      targetStep.failures = 0
+      targetStep.lastFailReason = ''
     }
     plan.activeStep = target
     this._advanceStep(plan, target, 'done')
     if (this.memory) this.memory.setPlan(plan)
     this.agent.emit('aiPlan', { plan, at: Date.now() })
+    return true
   }
 
   _offlineBuildPlan (snapshot) {
@@ -648,6 +673,41 @@ class Brain {
     return [{ name: 'explore', args: { distance: 8 } }]
   }
 
+  // 生存优先级：低血/低食/无装备时强制补给，避免 AI 在危险状态下自由行动。
+  // 返回动作数组或 null（无紧急需求）。
+  _survivalPriority (snapshot) {
+    const state = snapshot || {}
+    const bot = state.bot || {}
+    const health = Number(bot.health)
+    const food = Number(bot.food)
+
+    if (Number.isFinite(health) && health < 6) {
+      this.agent.emit('log', { level: 'warn', message: `生命值过低 (${health})，停止自由行动，先保命` })
+      return [{ name: 'eat', args: {} }]
+    }
+
+    if (Number.isFinite(food) && food < 6) {
+      this.agent.emit('log', { level: 'warn', message: `饥饿值过低 (${food})，先进食` })
+      return [{ name: 'eat', args: {} }]
+    }
+
+    // 有敌对生物且身上无武器/护甲时，先武装再应对
+    const hostiles = Array.isArray(state.nearbyHostiles) ? state.nearbyHostiles : []
+    const inventory = state.inventory
+    const items = (inventory && Array.isArray(inventory.items)) ? inventory.items : []
+    const hasWeapon = items.some(i => String(i && i.name || '').toLowerCase().includes('sword') || String(i && i.name || '').toLowerCase().includes('axe'))
+    const hasArmor = items.some(i => {
+      const n = String(i && i.name || '').toLowerCase()
+      return n.includes('helmet') || n.includes('chestplate') || n.includes('leggings') || n.includes('boots')
+    })
+    if (hostiles.length && !hasWeapon && !hasArmor) {
+      this.agent.emit('log', { level: 'warn', message: `附近有敌对生物且无武装，先装备` })
+      return [{ name: 'armor', args: {} }]
+    }
+
+    return null
+  }
+
   async tick () {
     if (!this.running || this.ticking) return
     if (!this.agent.connected) {
@@ -681,6 +741,15 @@ class Brain {
     try {
       const snapshot = this.agent.snapshot()
       this._autoCompletePrepSteps(snapshot)
+
+      // 生存优先级：先保命/补给，再交给 AI 决策
+      const urgent = this._survivalPriority(snapshot)
+      if (urgent) {
+        this._dispatchPlan(urgent, snapshot)
+        this._scheduleNext()
+        return
+      }
+
       const data = await chatCompletion({
         baseUrl: this.config.baseUrl,
         apiKey: this.config.apiKey,
@@ -725,10 +794,15 @@ class Brain {
   }
 
   _userPayload (snapshot) {
+    const plan = this.plan
+    const activeStep = plan && Array.isArray(plan.steps) && plan.steps.length
+      ? plan.steps[Math.min(plan.activeStep || 0, plan.steps.length - 1)]
+      : null
     return {
       worldState: snapshot,
       goal: this.goal,
-      plan: this.plan,
+      plan: plan,
+      activeStep: activeStep ? { name: activeStep.name, note: activeStep.note || '', failures: activeStep.failures || 0, lastFailReason: activeStep.lastFailReason || '' } : null,
       previousPlan: this.lastPlan.slice(0, 6),
       previousResults: this.lastResults.slice(-8),
       instruction: this._instruction()
