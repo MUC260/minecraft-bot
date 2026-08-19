@@ -1,6 +1,6 @@
 {
     "name":  "minecraft-bot",
-    "version":  "0.2.0",
+    "version": "3.1.0",
     "private":  true,
     "description":  "AI-driven Minecraft bot framework: lightweight desktop + server deployable.",
     "main":  "index.js",

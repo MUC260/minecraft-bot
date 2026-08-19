@@ -64,6 +64,54 @@ npm run desktop
 
 打开 http://127.0.0.1:8787
 
+## AI 模型配置
+
+机器人支持接入**任何 OpenAI 兼容格式的 API**，包括 OpenAI 官方、DeepSeek、Claude（通过兼容网关）、Ollama 本地模型、火山引擎等。
+
+在 `config.json` 的 `ai` 字段配置：
+
+```json
+"ai": {
+  "enabled": true,
+  "baseUrl": "https://api.openai.com/v1",
+  "apiKey": "sk-your-api-key-here",
+  "model": "gpt-4o-mini",
+  "temperature": 0.2,
+  "maxTokens": 1200,
+  "intervalMs": 4000
+}
+```
+
+| 字段 | 说明 | 示例 |
+|------|------|------|
+| `baseUrl` | API 端点（必须以 `/v1` 结尾） | `https://api.openai.com/v1` |
+| `apiKey` | 你的 API Key | `sk-...` |
+| `model` | 模型名称（与 API 服务商提供的名称一致） | `gpt-4o-mini`、`deepseek-v4-flash` |
+| `temperature` | 随机性，0 最稳定 | `0.2` |
+| `maxTokens` | 单次回复最大 token 数 | `1200` |
+| `intervalMs` | AI 决策循环间隔（毫秒） | `4000` |
+
+**备用模型**：`fallback` 字段支持配置备用 API，主 API 失败时自动切换：
+
+```json
+"fallback": {
+  "baseUrl": "https://api.deepseek.com/v1",
+  "apiKey": "sk-your-fallback-key",
+  "model": "deepseek-chat"
+}
+```
+
+也支持通过 `.env` 环境变量配置（适合不把 Key 写进文件）：
+
+```bash
+AI_BASE_URL=https://api.openai.com/v1
+AI_API_KEY=sk-your-key
+```
+
+> **注意**：API Key 是敏感信息，不要提交到 GitHub。`.gitignore` 已忽略 `config.json`、`.env`。
+
+配置完成后在控制面板（http://127.0.0.1:8787）点击「启动 AI」，日志出现 `自主决策循环启动` 即代表 AI 已就绪。
+
 ## 打包 Windows exe
 
 ```bash
