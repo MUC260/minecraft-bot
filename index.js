@@ -55,7 +55,7 @@ async function main () {
     brain.start()
   }
 
-  api.start(agent, brain, config)
+  api.start(agent, brain, config, commander)
 
   const shutdown = () => {
     logger.info('正在关闭...')

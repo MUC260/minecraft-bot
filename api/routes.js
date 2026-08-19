@@ -2,7 +2,7 @@ const express = require('express')
 const logger = require('../lib/logger')
 const { listModels } = require('../ai/provider')
 
-module.exports = function createRouter (agent, brain, config) {
+module.exports = function createRouter (agent, brain, config, commander) {
   const router = express.Router()
   const notify = () => agent.emit('status', agent.status())
 
@@ -128,6 +128,64 @@ module.exports = function createRouter (agent, brain, config) {
     try {
       await brain.tick()
       res.json({ ok: true })
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message })
+    }
+  })
+
+  // ── AI 成员管理 + 唤醒词配置 ──────────────────────────────
+
+  /** 获取当前 AI 唤醒词和成员白名单 */
+  router.get('/ai/config', (req, res) => {
+    try {
+      const aiCfg = config.getConfig ? config.getConfig().ai : config.ai || {}
+      res.json({
+        ok: true,
+        aiMention: String(aiCfg.aiMention || '@ai'),
+        aiMembers: Array.isArray(aiCfg.aiMembers) ? aiCfg.aiMembers : []
+      })
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message })
+    }
+  })
+
+  /** 更新 AI 唤醒词和成员白名单 */
+  router.put('/ai/config', (req, res) => {
+    try {
+      const body = req.body || {}
+      const patch = { ai: {} }
+      if (body.aiMention !== undefined) patch.ai.aiMention = String(body.aiMention || '@ai').trim() || '@ai'
+      if (body.aiMembers !== undefined) patch.ai.aiMembers = Array.isArray(body.aiMembers) ? body.aiMembers : []
+
+      const saved = config.saveConfig ? config.saveConfig(patch) : config
+      const newAi = saved && saved.ai ? saved.ai : {}
+
+      // 同步到 commander 运行时配置
+      if (commander && typeof commander.updateAiConfig === 'function') {
+        commander.updateAiConfig(newAi)
+      }
+
+      res.json({
+        ok: true,
+        aiMention: String(newAi.aiMention || '@ai'),
+        aiMembers: Array.isArray(newAi.aiMembers) ? newAi.aiMembers : []
+      })
+    } catch (e) {
+      res.status(400).json({ ok: false, error: e.message })
+    }
+  })
+
+  /** 获取当前在线玩家列表（用于便捷勾选） */
+  router.get('/ai/players', (req, res) => {
+    try {
+      const bot = agent && agent.bot
+      const players = bot && bot.players ? Object.keys(bot.players) : []
+      const online = players.filter(p => {
+        if (!bot) return false
+        const player = bot.players[p]
+        return player && player.username !== bot.username
+      })
+      res.json({ ok: true, players: online })
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message })
     }

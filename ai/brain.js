@@ -789,6 +789,92 @@ class Brain {
     this._scheduleNext()
   }
 
+  /**
+   * 处理玩家 @ai 指令：暂停自主循环 → 调用 LLM 分析 → 执行动作 → 恢复
+   * @param {string} message - 玩家输入的指令文本
+   * @param {string} username - 玩家名
+   * @returns {Promise<{reply: string, actions: Array}>}
+   */
+  async ask (message, username) {
+    const isRunning = this.running
+    if (isRunning) this.stop()
+
+    const snapshot = this.agent.snapshot()
+    const payload = this._userPayload(snapshot)
+
+    // 构建 @ai 专用 prompt：告诉 AI 这是玩家直接指令，不是自主决策
+    const askPrompt = `你正在 Minecraft 中运行。玩家 @${username} 向你下达了指令。请分析指令，返回一个 JSON 对象格式的回复。
+
+指令：${message}
+
+当前世界状态：${JSON.stringify(snapshot)}
+
+可用工具：
+${JSON.stringify(TOOLS.map(t => ({ name: t.function.name, description: t.function.description })))}
+
+回复格式必须严格为 JSON：
+{
+  "reply": "给玩家的回复文字，简要说明你做了什么",
+  "actions": [{"name": "动作名", "args": {}}]
+}
+
+actions 数组可以为空（如果只需要回复）。动作名必须是可用工具中的名称。`
+
+    const messages = [
+      { role: 'system', content: this.systemPrompt },
+      { role: 'system', content: '当前处于玩家指令模式，直接执行玩家要求，不要自主决策。' },
+      { role: 'user', content: askPrompt }
+    ]
+
+    try {
+      // 注入到 history 用于上下文的连续
+      this._pushHistory('user', `${username}: ${message}`)
+
+      const data = await chatCompletion({
+        baseUrl: this.config.baseUrl,
+        apiKey: this.config.apiKey,
+        model: this.config.model,
+        messages,
+        tools: TOOLS,
+        temperature: 0.2,
+        maxTokens: 1200
+      })
+
+      let actions = this._normalizeActions(parseActions(data))
+      const reply = this._extractReply(data) || `已收到指令：${message}`
+
+      this._pushHistory('assistant', reply)
+
+      // 执行动作
+      if (actions.length && this.executor) {
+        this._dispatchPlan(actions, snapshot)
+      }
+
+      return { reply, actions }
+    } catch (e) {
+      this.lastError = e.message
+      logger.warn(`AI 指令处理失败: ${e.message}`)
+      return { reply: `处理指令时出错: ${e.message}`, actions: [] }
+    } finally {
+      if (isRunning) this.start()
+    }
+  }
+
+  _extractReply (data) {
+    // 尝试从 LLM 回复中提取 reply 字段
+    if (data && typeof data === 'object') {
+      if (data.reply) return data.reply
+      if (data.content && typeof data.content === 'string') {
+        try {
+          const parsed = JSON.parse(data.content)
+          if (parsed.reply) return parsed.reply
+        } catch {}
+        return data.content.slice(0, 200)
+      }
+    }
+    return null
+  }
+
   _buildMessages (snapshot) {
     const messages = [
       { role: 'system', content: this.systemPrompt },
