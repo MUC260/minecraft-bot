@@ -132,6 +132,7 @@ class BotAgent extends EventEmitter {
       this._schedulePluginAuth(bot)
       logger.info(`已生成 ${bot.username}`)
       this.emit('spawn')
+      this.emit('commanderReady', String(bot.username || ''))
       this.emit('status', this.status())
     })
 

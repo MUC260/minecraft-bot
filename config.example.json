@@ -29,7 +29,6 @@
         "maxTokens": 1200,
         "intervalMs": 4000,
         "planAhead": true,
-        "aiMention": "@ai",
         "aiMembers": [],
         "memoryFile": "",
         "memoryMaxMessages": 40,

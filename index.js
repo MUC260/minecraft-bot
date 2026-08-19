@@ -47,6 +47,11 @@ async function main () {
     attachExecutorListeners(executor)
     brain.setExecutor(executor)
   })
+  // 机器人连接成功时，同步唤醒词为 @机器人名
+  agent.on('commanderReady', (username) => {
+    commander.onBotReady(username)
+    logger.info(`唤醒词已同步为 @${username}`)
+  })
 
   if (config.ai.enabled) {
     if (!config.ai.apiKey || /^sk-xxx$/i.test(String(config.ai.apiKey))) {

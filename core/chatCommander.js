@@ -104,16 +104,28 @@ class ChatCommander {
     this._lastCommandAt = new Map()
     this.aiCommands = this.mc.aiCommands !== false
     this.commandPrefix = this.mc.commandPrefix == null ? '!' : String(this.mc.commandPrefix)
-    // @ai 唤醒词配置（支持在后台修改）
-    this.aiMention = String((config && config.ai && config.ai.aiMention) || '@ai')
+    // @ai 唤醒词：默认 @机器人名（动态），config 有自定义值时优先用自定义
+    this._customAiMention = String((config && config.ai && config.ai.aiMention) || '').trim()
+    this.aiMention = this._customAiMention || '@' + String(this.mc.username || 'AIBot')
     this.aiMembers = this._memberNames(config && config.ai && config.ai.aiMembers)
     this.agent.on('chat', (item) => this.onChat(item))
+  }
+
+  /** 机器人连接后调用，同步唤醒词为 @机器人名 */
+  onBotReady (username) {
+    if (!this._customAiMention) {
+      this.aiMention = '@' + String(username || this.mc.username || 'AIBot')
+    }
   }
 
   /** 后台动态更新 @ai 配置 */
   updateAiConfig (aiConfig) {
     const cfg = aiConfig || {}
-    if (cfg.aiMention !== undefined) this.aiMention = String(cfg.aiMention || '@ai').trim() || '@ai'
+    if (cfg.aiMention !== undefined) {
+      this._customAiMention = String(cfg.aiMention || '').trim()
+      this.aiMention = this._customAiMention
+        || '@' + String(this.mc.username || 'AIBot')
+    }
     if (cfg.aiMembers !== undefined) this.aiMembers = this._memberNames(cfg.aiMembers)
   }
 
@@ -132,12 +144,22 @@ class ChatCommander {
 
   _matchMention (raw) {
     const text = String(raw || '').trim()
-    if (!text) return null
-    const mention = String(this.aiMention || '@ai').toLowerCase()
+    if (!text || !text.startsWith('@')) return null
+    // 唤醒词 = @机器人名，支持自定义覆盖
+    // 匹配 "@AIBot 指令" 或 "@AIBot指令"
+    const mention = this.aiMention.toLowerCase()
     const lowered = text.toLowerCase()
     if (lowered === mention) return ''
     if (lowered.startsWith(mention + ' ') || lowered.startsWith(mention + '\u00A0')) {
       return text.slice(mention.length).trim()
+    }
+    // 自定义唤醒词（完整匹配）
+    if (this._customAiMention) {
+      const custom = this._customAiMention.toLowerCase()
+      if (lowered === custom) return ''
+      if (lowered.startsWith(custom + ' ') || lowered.startsWith(custom + '\u00A0')) {
+        return text.slice(this._customAiMention.length).trim()
+      }
     }
     return null
   }
@@ -160,8 +182,6 @@ class ChatCommander {
       this._ack('用法：' + this.aiMention + ' <指令>，例如：' + this.aiMention + ' 去附近砍树')
       return true
     }
-
-    // 防止刷屏：同人 3 秒冷却
     const now = Date.now()
     const key = 'ai:' + String(username || '').toLowerCase()
     const last = this._lastCommandAt.get(key) || 0
@@ -207,7 +227,8 @@ class ChatCommander {
         this._ack('用法：!ai setword <唤醒词>，例如：!ai setword @AI')
         return true
       }
-      const prev = this.aiMention
+      const prev = this._customAiMention || '(默认@' + this.mc.username + ')'
+      this._customAiMention = word
       this.aiMention = word
       this.config.saveConfig ? this.config.saveConfig({ ai: { aiMention: word } }) : null
       logger.info(`AI 唤醒词由 ${prev} 改为 ${word}`)
