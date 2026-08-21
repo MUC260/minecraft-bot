@@ -29,7 +29,9 @@ class Brain {
     this.aiErrorStreak = 0
     this.aiBackoffMs = 0
     this._offlineStep = 0
+    this._lastSurvivalEatAt = 0
     this._lastSurvivalArmorAt = 0
+    this._lastSurvivalAttackAt = 0
     this.history = []
     this._pendingAssistant = null
     this._followRetryTimer = null
@@ -47,6 +49,9 @@ class Brain {
     }
     this._onQueueFailure = ({ call, result }) => {
       this._recordBatchEnd()
+      if (call && call.name === 'follow' && this.followTarget && !this.holdPosition) {
+        this._scheduleRefollow(2000)
+      }
       this._kick(300)
     }
     this._onSkillResult = ({ call, result }) => {

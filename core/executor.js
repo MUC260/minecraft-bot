@@ -155,12 +155,21 @@ class SkillExecutor extends EventEmitter {
 
   async _waitForResume () {
     const start = Date.now()
+    const debounce = Math.max(50, Number(this.resumeDebounceMs) || 1000)
+    const gate = Math.max(1000, Number(this.resumeGateTimeoutMs) || 30000)
     while (true) {
       const owner = this.pathfinderOwner
-      const ownerIdle = owner ? owner.isIdle() : true
-      const releasedAt = owner ? (owner.lastReleasedAt || 0) : Date.now()
-      if (!this.paused && ownerIdle && Date.now() - releasedAt >= this.resumeDebounceMs) return true
-      if (Date.now() - start > this.resumeGateTimeoutMs) return false
+      if (!owner) return true
+      // Reactive still owns the pathfinder: wait for it to release instead of
+      // spinning the same preempted skill every event-loop turn.
+      if (owner.currentOwner() === 'reactive') {
+        if (Date.now() - start > gate) return false
+        await new Promise(resolve => setTimeout(resolve, 50))
+        continue
+      }
+      const releasedAt = Number(owner.lastReleasedAt) || 0
+      if (!this.paused && owner.isIdle() && releasedAt > 0 && Date.now() - releasedAt >= debounce) return true
+      if (Date.now() - start > gate) return false
       await new Promise(resolve => setTimeout(resolve, 50))
     }
   }

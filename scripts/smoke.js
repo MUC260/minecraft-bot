@@ -127,6 +127,7 @@ function mockBotForReactive () {
   const brain = new Brain(agent, { intervalMs: 1500, apiKey: 'sk-valid' })
   const lowHealth = brain._survivalPriority({ bot: { health: 3, food: 20 }, nearbyHostiles: [], inventory: { items: [] } })
   assert.strictEqual(lowHealth[0].name, 'eat', 'low health should force eat')
+  brain._lastSurvivalEatAt = 0
   const lowFood = brain._survivalPriority({ bot: { health: 20, food: 4 }, nearbyHostiles: [], inventory: { items: [] } })
   assert.strictEqual(lowFood[0].name, 'eat', 'low food should force eat')
   const normal = brain._survivalPriority({ bot: { health: 20, food: 20 }, nearbyHostiles: [], inventory: { items: [{ name: 'iron_sword', count: 1 }] } })
