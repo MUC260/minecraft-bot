@@ -1035,12 +1035,26 @@ actions 数组可以为空（如果只需要回复）。动作名必须是可用
   }
 
   _extractReply (data) {
-    // OpenAI-style: read choices[0].message.content (JSON {reply} or plain text) and chat tool_calls
+    // OpenAI-style: prefer a native chat tool call, then content, then reasoning.
     const message = data && data.choices && data.choices[0] && data.choices[0].message
     if (!message) return null
 
+    const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
+    if (hasToolCalls) {
+      for (const tc of message.tool_calls) {
+        if (tc && tc.function && tc.function.name === 'chat') {
+          try {
+            const args = JSON.parse(tc.function.arguments || '{}')
+            if (args && typeof args.message === 'string' && args.message.trim()) return args.message.trim().slice(0, 200)
+          } catch {}
+        }
+      }
+    }
+
     let content = message.content
-    if (typeof content !== 'string' || !content.trim()) content = message.reasoning_content || message.reasoning || ''
+    if (typeof content !== 'string' || !content.trim()) {
+      content = hasToolCalls ? '' : (message.reasoning_content || message.reasoning || '')
+    }
     if (typeof content === 'string' && content.trim()) {
       let text = content.trim()
       // strip a leading markdown code fence if present
@@ -1058,17 +1072,6 @@ actions 数组可以为空（如果只需要回复）。动作名必须是可用
         if (parsed && typeof parsed.reply === 'string' && parsed.reply.trim()) return parsed.reply.trim()
       } catch {}
       if (!text.startsWith('{')) return text.slice(0, 200)
-    }
-
-    if (Array.isArray(message.tool_calls)) {
-      for (const tc of message.tool_calls) {
-        if (tc && tc.function && tc.function.name === 'chat') {
-          try {
-            const args = JSON.parse(tc.function.arguments || '{}')
-            if (args && typeof args.message === 'string' && args.message.trim()) return args.message.trim().slice(0, 200)
-          } catch {}
-        }
-      }
     }
 
     return null

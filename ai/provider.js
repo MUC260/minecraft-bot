@@ -180,8 +180,9 @@ function parseActions (data) {
   const message = data && data.choices && data.choices[0] && data.choices[0].message
   if (!message) return []
   const actions = []
+  const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
 
-  if (Array.isArray(message.tool_calls)) {
+  if (hasToolCalls) {
     for (const tc of message.tool_calls) {
       let args = {}
       try { args = JSON.parse(tc.function && tc.function.arguments || '{}') } catch {}
@@ -189,7 +190,9 @@ function parseActions (data) {
     }
   }
 
-  const content = effectiveContent(message)
+  const content = (typeof message.content === 'string' && message.content.trim())
+    ? message.content
+    : (hasToolCalls ? '' : effectiveContent(message))
   if (content) {
     const cleaned = stripFence(content)
     let direct = null
