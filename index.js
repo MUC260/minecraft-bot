@@ -17,6 +17,8 @@ async function main () {
     memoryFile: config.ai.memoryFile || path.join(config.root, 'logs', 'brain-memory.json')
   })
   const commander = new ChatCommander(agent, brain, config)
+  const mountBrain = (bot) => { if (bot) bot.brain = brain }
+  mountBrain(agent.bot)
 
   logger.on('log', (item) => agent.emit('log', item))
 
@@ -46,6 +48,7 @@ async function main () {
   agent.on('executor', (executor) => {
     attachExecutorListeners(executor)
     brain.setExecutor(executor)
+    mountBrain(agent.bot)
   })
 
   if (config.ai.enabled) {

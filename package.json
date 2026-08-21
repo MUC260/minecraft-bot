@@ -41,6 +41,7 @@
                 "assets":  [
                                "ui/**/*",
                                "ai/prompts/**/*",
+                               "ai/knowledge/**/*",
                                "config.example.json",
                                ".env.example"
                            ]

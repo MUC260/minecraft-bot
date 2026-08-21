@@ -2718,7 +2718,71 @@ const handlers = {
     const ms = Math.min(Number(args.ms || 500), 10000)
     await sleep(ms, ctx)
     return `等待 ${ms}ms`
-  }
+  },
+
+
+  build_plan: async (bot, args, ctx) => builderBuildPlan(bot, args, ctx),
+  scan: async (bot, args, ctx) => builderScan(bot, args, ctx),
+  query: async (bot, args, ctx) => builderQuery(bot, args, ctx),
+  verify_path: async (bot, args, ctx) => builderVerifyPath(bot, args, ctx),
+  query_block: async (bot, args) => {
+    const knowledge = require('../ai/knowledge')
+    const entry = knowledge.queryBlock(args.name)
+    if (!entry) throw new Error('方块百科里没有: ' + (args.name || ''))
+    return JSON.stringify({ name: entry.name, category: entry.category, usage: (entry.usage || '').slice(0, 1600), properties: (entry.properties || []).slice(0, 8) })
+  },
+  query_building: async (bot, args) => {
+    const knowledge = require('../ai/knowledge')
+    const entry = knowledge.queryBuilding(args.id)
+    if (!entry) throw new Error('建筑教程里没有: ' + (args.id || '') + '，可用: ' + knowledge.listBuildingIds().join(', '))
+    return JSON.stringify({ id: entry.id, name: entry.name, category: entry.category, guide: entry.guide })
+  },
+  plan: async (bot, args) => {
+    const brain = bot.brain
+    if (!brain) throw new Error('brain 未挂载')
+    const todos = brain.setAiPlan(args.todos)
+    return '计划已更新: ' + JSON.stringify(todos)
+  },
+  set_goal: async (bot, args) => {
+    const brain = bot.brain
+    if (!brain) throw new Error('brain 未挂载')
+    const goal = brain.setAiGoal(args.goal)
+    return '目标已设为: ' + goal
+  },
+  pause_goal: async (bot) => {
+    const brain = bot.brain
+    if (!brain) throw new Error('brain 未挂载')
+    brain.pauseAiGoal()
+    return '任务已暂停，原地待命'
+  },
+  resume_goal: async (bot) => {
+    const brain = bot.brain
+    if (!brain) throw new Error('brain 未挂载')
+    brain.resumeAiGoal()
+    return '任务已恢复'
+  },
+  cancel_goal: async (bot) => {
+    const brain = bot.brain
+    if (!brain) throw new Error('brain 未挂载')
+    brain.cancelAiGoal()
+    return '任务已取消，回到自由行动'
+  },
+  recall: async (bot, args) => {
+    const brain = bot.brain
+    const mem = brain && brain.memory
+    if (!mem) throw new Error('记忆未挂载')
+    const rows = mem.recall(args.query, { time: args.time, types: args.types, limit: args.limit })
+    if (!rows.length) return '没有检索到相关情景记忆'
+    return JSON.stringify(rows.map(e => ({ id: e.id, at: e.at, type: e.type, text: e.text })))
+  },
+  remember: async (bot, args) => {
+    const brain = bot.brain
+    const mem = brain && brain.memory
+    if (!mem) throw new Error('记忆未挂载')
+    const ep = mem.remember(args.text, args.type, args.meta || {})
+    return '已记住: ' + (ep ? ep.id : '空')
+  },
+
 }
 
 async function executeStructured (bot, action, ctx = {}) {
@@ -2747,6 +2811,256 @@ async function execute (bot, action) {
   if (r.preempted) throw new Error(r.reason || '动作被生存系统抢占')
   if (!r.ok) throw new Error(r.reason || '动作执行失败')
   return r.reason || r.result || 'done'
+}
+
+
+
+// ===== 融合 shabao-ai：shape 建造 / 地形感知 / 路径自检 =====
+
+function _iterBox3 (x1, y1, z1, x2, y2, z2, cb) {
+  const ax = Math.min(x1, x2); const bx = Math.max(x1, x2)
+  const ay = Math.min(y1, y2); const by = Math.max(y1, y2)
+  const az = Math.min(z1, z2); const bz = Math.max(z1, z2)
+  for (let x = ax; x <= bx; x++) for (let y = ay; y <= by; y++) for (let z = az; z <= bz; z++) cb(x, y, z)
+}
+
+function _iterRect (x1, z1, x2, z2, cb) {
+  const ax = Math.min(x1, x2); const bx = Math.max(x1, x2)
+  const az = Math.min(z1, z2); const bz = Math.max(z1, z2)
+  for (let x = ax; x <= bx; x++) for (let z = az; z <= bz; z++) cb(x, z)
+}
+
+function _shapePositions (bot, step) {
+  const shape = String(step.shape || '').toLowerCase()
+  if (Array.isArray(step.blocks) && step.blocks.length) {
+    return step.blocks.map(b => {
+      const arr = Array.isArray(b) ? b : (b && typeof b === 'object' ? [b.x, b.y, b.z, b.id] : null)
+      if (!arr) return null
+      const x = Math.floor(Number(arr[0])); const y = Math.floor(Number(arr[1])); const z = Math.floor(Number(arr[2]))
+      if (![x, y, z].every(Number.isFinite)) return null
+      return { x, y, z, id: arr[3] ? String(arr[3]) : null }
+    }).filter(Boolean)
+  }
+  const x1 = Math.floor(Number(step.x1)); const y1 = Math.floor(Number(step.y1)); const z1 = Math.floor(Number(step.z1))
+  const x2 = Math.floor(Number(step.x2)); const y2 = Math.floor(Number(step.y2)); const z2 = Math.floor(Number(step.z2))
+  const out = []
+  if (shape === 'fill') {
+    _iterBox3(x1, y1, z1, x2, y2, z2, (x, y, z) => out.push({ x, y, z, id: null }))
+  } else if (shape === 'box') {
+    _iterBox3(x1, y1, z1, x2, y2, z2, (x, y, z) => {
+      if (x === x1 || x === x2 || y === y1 || y === y2 || z === z1 || z === z2) out.push({ x, y, z, id: null })
+    })
+  } else if (shape === 'wall') {
+    _iterBox3(x1, y1, z1, x2, y2, z2, (x, y, z) => {
+      if (x === x1 || x === x2 || z === z1 || z === z2) out.push({ x, y, z, id: null })
+    })
+  } else if (shape === 'floor') {
+    const y = Math.floor(Number(step.y))
+    if (!Number.isFinite(y)) return out
+    _iterRect(x1, z1, x2, z2, (x, z) => {
+      const hx1 = step.hx1 !== undefined ? Math.floor(Number(step.hx1)) : null
+      const hz1 = step.hz1 !== undefined ? Math.floor(Number(step.hz1)) : null
+      const hx2 = step.hx2 !== undefined ? Math.floor(Number(step.hx2)) : null
+      const hz2 = step.hz2 !== undefined ? Math.floor(Number(step.hz2)) : null
+      if (hx1 !== null && hz1 !== null && hx2 !== null && hz2 !== null) {
+        if (x >= Math.min(hx1, hx2) && x <= Math.max(hx1, hx2) && z >= Math.min(hz1, hz2) && z <= Math.max(hz1, hz2)) return
+      }
+      out.push({ x, y, z, id: null })
+    })
+  } else if (shape === 'door' || shape === 'stairs' || shape === 'ladder' || shape === 'spiral') {
+    const x = Math.floor(Number(step.x)); const y = Math.floor(Number(step.y)); const z = Math.floor(Number(step.z))
+    if (![x, y, z].every(Number.isFinite)) return out
+    const id = step.block || (shape === 'door' ? 'oak_door' : shape === 'ladder' ? 'ladder' : 'oak_stairs')
+    out.push({ x, y, z, id: String(id) })
+  }
+  return out
+}
+
+async function _builderPlaceOne (bot, target, material, ctx) {
+  const pos = new Vec3(target.x, target.y, target.z)
+  const block = bot.blockAt(pos)
+  if (!block) return 'skipped'
+  if (block.boundingBox !== 'empty') return 'skipped'
+  if (target.id) {
+    const item = findInventoryItemByName(bot, target.id)
+    if (!item) return 'skipped'
+    const r = await placeSpecificItemAt(bot, pos, ctx, item)
+    if (r && r.preempted) throw abortError(r.reason || 'reactive preempt')
+    return r === true ? 'placed' : 'skipped'
+  }
+  const ok = await placeBuildBlock(bot, pos, ctx, material)
+  return ok ? 'placed' : 'skipped'
+}
+
+function _builderSurfaceY (bot, x, z) {
+  const p = bot.entity.position
+  for (let y = Math.floor(p.y) + 28; y >= Math.floor(p.y) - 28; y--) {
+    const b = bot.blockAt(new Vec3(x, y, z))
+    if (!b) continue
+    const n = lowerBlockName(b)
+    if (b.boundingBox !== 'empty' && !n.includes('water') && !n.includes('lava') && !n.includes('air') && !n.includes('leaves')) return y
+  }
+  return null
+}
+
+async function builderBuildPlan (bot, args, ctx) {
+  throwIfAborted(ctx)
+  const steps = Array.isArray(args.steps) ? args.steps : []
+  if (!steps.length) throw new Error('build_plan 需要 steps 数组')
+  const summary = { placed: 0, skipped: 0, invalid: 0, failures: [] }
+  for (const step of steps) {
+    throwIfAborted(ctx)
+    if (!step || typeof step !== 'object') { summary.invalid++; continue }
+    if (String(step.shape || '').toLowerCase() === 'clear') {
+      const r = await builderClearTerrain(bot, step, ctx)
+      if (r && r.preempted) throw abortError(r.reason || 'reactive preempt')
+      if (r) { summary.placed += r.placed; summary.skipped += r.skipped; summary.failures.push(...r.failures) }
+      continue
+    }
+    const positions = _shapePositions(bot, step)
+    if (!positions.length) { summary.invalid++; continue }
+    const p = bot.entity.position
+    positions.sort((a, b) => (((a.x - p.x) ** 2 + (a.y - p.y) ** 2 + (a.z - p.z) ** 2) - ((b.x - p.x) ** 2 + (b.y - p.y) ** 2 + (b.z - p.z) ** 2)))
+    for (const target of positions) {
+      throwIfAborted(ctx)
+      try {
+        const r = await _builderPlaceOne(bot, target, step.material, ctx)
+        if (r === 'placed') summary.placed++
+        else if (r === 'skipped') summary.skipped++
+        else summary.failures.push(target.x + ',' + target.y + ',' + target.z)
+      } catch (err) {
+        if (err && (err.code === 'ABORT_ERR' || ctx.signal?.aborted)) throw err
+        summary.failures.push(target.x + ',' + target.y + ',' + target.z + ':' + String(err.message || err))
+      }
+    }
+  }
+  return 'build_plan 完成: 放置 ' + summary.placed + '，跳过 ' + summary.skipped + '，失败 ' + summary.failures.length + (summary.failures.length ? ' → ' + summary.failures.slice(0, 8).join('; ') : '')
+}
+
+async function builderClearTerrain (bot, step, ctx) {
+  const x1 = Math.floor(Number(step.x1)); const z1 = Math.floor(Number(step.z1))
+  const x2 = Math.floor(Number(step.x2)); const z2 = Math.floor(Number(step.z2))
+  if (![x1, z1, x2, z2].every(Number.isFinite)) throw new Error('clear 需要 x1,z1,x2,z2')
+  const material = step.material || null
+  const summary = { placed: 0, skipped: 0, failures: [] }
+
+  // 未指定 y 时取区域内最高地表（把低洼填到该层，避免地基悬空；削高需手动）
+  let targetY = Number(step.y)
+  if (!Number.isFinite(targetY)) {
+    let maxY = -Infinity
+    _iterRect(x1, z1, x2, z2, (x, z) => { const t = _builderSurfaceY(bot, x, z); if (t !== null) maxY = Math.max(maxY, t) })
+    if (!Number.isFinite(maxY)) throw new Error('无法采样该区域地表')
+    targetY = Math.floor(maxY)
+  }
+  const fills = []
+  _iterRect(x1, z1, x2, z2, (x, z) => {
+    const top = _builderSurfaceY(bot, x, z)
+    if (top === null) return
+    if (top < targetY) for (let y = top + 1; y <= targetY; y++) fills.push([x, y, z])
+  })
+  fills.sort((a, b) => (((a[0] - bot.entity.position.x) ** 2 + (a[2] - bot.entity.position.z) ** 2) - ((b[0] - bot.entity.position.x) ** 2 + (b[2] - bot.entity.position.z) ** 2)))
+  for (const [x, y, z] of fills) {
+    throwIfAborted(ctx)
+    try {
+      const r = await _builderPlaceOne(bot, { x, y, z, id: null }, material, ctx)
+      if (r === 'placed') summary.placed++
+      else summary.skipped++
+    } catch (err) {
+      if (err && (err.code === 'ABORT_ERR' || ctx.signal?.aborted)) throw err
+      summary.failures.push(x + ',' + y + ',' + z)
+    }
+  }
+  return summary
+}
+
+async function builderScan (bot, args, ctx) {
+  const p = bot.entity.position
+  const cx = Math.floor(args.x ?? p.x)
+  const cy = Math.floor(args.y ?? p.y)
+  const cz = Math.floor(args.z ?? p.z)
+  const radius = Math.max(2, Math.min(32, Number(args.radius ?? 12)))
+  const heights = []
+  let water = 0; let lava = 0; let solid = 0; let air = 0
+  _iterRect(cx - radius, cz - radius, cx + radius, cz + radius, (x, z) => {
+    const top = _builderSurfaceY(bot, x, z)
+    if (top !== null) heights.push(top)
+    for (let y = cy - 3; y <= cy + 3; y++) {
+      const b = bot.blockAt(new Vec3(x, y, z))
+      if (!b) continue
+      const n = lowerBlockName(b)
+      if (n.includes('water')) water++
+      else if (n.includes('lava')) lava++
+      else if (b.boundingBox !== 'empty') solid++
+      else air++
+    }
+  })
+  let median = null; let minY = null; let maxY = null
+  if (heights.length) {
+    const sorted = heights.slice().sort((a, b) => a - b)
+    median = sorted[Math.floor(sorted.length / 2)]
+    minY = sorted[0]; maxY = sorted[sorted.length - 1]
+  }
+  return JSON.stringify({
+    center: { x: cx, y: cy, z: cz },
+    radius,
+    ground: { medianY: median, minY, maxY, sampled: heights.length },
+    blocks: { solid, air, water, lava }
+  })
+}
+
+async function builderQuery (bot, args, ctx) {
+  const p = bot.entity.position
+  const ground = _builderSurfaceY(bot, Math.floor(p.x), Math.floor(p.z))
+  const brain = bot.brain
+  const mem = brain && brain.memory ? brain.memory.snapshot() : null
+  const recent = (mem && mem.episodes ? mem.episodes : []).slice(-6).map(e => '[' + e.type + '] ' + e.text.slice(0, 120))
+  const obs = observations.build(bot, [])
+  return JSON.stringify({
+    position: { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) },
+    groundY: ground,
+    health: bot.health,
+    food: bot.food,
+    dimension: bot.game && bot.game.dimension,
+    goal: brain ? brain.goal : null,
+    inventory: obs.inventory && obs.inventory.items ? obs.inventory.items.slice(0, 24).map(i => ({ name: i.name, count: i.count })) : [],
+    nearbyHostiles: (obs.nearbyHostiles || []).slice(0, 5).map(e => e.name),
+    recentEpisodes: recent
+  })
+}
+
+function _walkableName (n) {
+  return n.includes('air') || n.includes('water') || n === 'ladder' || n.endsWith('_stairs') || n.endsWith('_slab') || n === 'torch' || n === 'grass' || n.endsWith('_carpet')
+}
+
+async function builderVerifyPath (bot, args, ctx) {
+  const a = Array.isArray(args.from) ? args.from : [args.x1, args.y1, args.z1]
+  const b = Array.isArray(args.to) ? args.to : [args.x2, args.y2, args.z2]
+  const sx = Math.floor(Number(a[0])); const sy = Math.floor(Number(a[1])); const sz = Math.floor(Number(a[2]))
+  const tx = Math.floor(Number(b[0])); const ty = Math.floor(Number(b[1])); const tz = Math.floor(Number(b[2]))
+  if (![sx, sy, sz, tx, ty, tz].every(Number.isFinite)) throw new Error('verify_path 需要 from/to 或 x1,y1,z1,x2,y2,z2')
+  const limit = 4000
+  const key = (x, y, z) => x + ',' + y + ',' + z
+  const seen = new Set([key(sx, sy, sz)])
+  const queue = [[sx, sy, sz]]
+  const dirs = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]
+  let steps = 0
+  while (queue.length && steps < limit) {
+    const [x, y, z] = queue.shift()
+    if (x === tx && y === ty && z === tz) return JSON.stringify({ reachable: true, steps, from: [sx,sy,sz], to: [tx,ty,tz] })
+    steps++
+    for (const [dx, dy, dz] of dirs) {
+      const nx = x + dx; const ny = y + dy; const nz = z + dz
+      const k = key(nx, ny, nz)
+      if (seen.has(k)) continue
+      const block = bot.blockAt(new Vec3(nx, ny, nz))
+      if (!block) continue
+      const n = lowerBlockName(block)
+      if (_walkableName(n) || block.boundingBox === 'empty') {
+        seen.add(k); queue.push([nx, ny, nz])
+      }
+    }
+  }
+  return JSON.stringify({ reachable: false, steps, from: [sx,sy,sz], to: [tx,ty,tz], reason: 'BFS 无法连通（或被方块隔断）' })
 }
 
 module.exports = {

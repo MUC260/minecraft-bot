@@ -167,6 +167,101 @@ class Brain {
     }
     return this.goal
   }
+  setAiGoal (goal) {
+    return this.setGoal(goal)
+  }
+
+  setAiPlan (todos) {
+    const steps = this._normalizeAiTodos(todos)
+    this.plan = {
+      goal: this.goal,
+      steps,
+      activeStep: 0,
+      status: steps.length ? 'running' : 'idle',
+      loop: false,
+      note: 'AI 制定计划',
+      updatedAt: Date.now()
+    }
+    this._lastPlanKey = ''
+    this._repeatStreak = 0
+    this._forceVary = false
+    this._pendingAssistant = null
+    this._pushHistory('user', '【AI 计划】' + JSON.stringify(this.plan))
+    if (this.memory) this.memory.setGoal(this.goal, this.plan)
+    this.agent.emit('aiPlan', { plan: this.plan, at: Date.now() })
+    return steps
+  }
+
+  _normalizeAiTodos (todos) {
+    const list = Array.isArray(todos) ? todos : []
+    const steps = []
+    for (const t of list) {
+      if (!t) continue
+      if (typeof t === 'string') {
+        steps.push({ name: this._inferStepName(t), args: {}, note: t, done: false })
+        continue
+      }
+      if (typeof t !== 'object') continue
+      steps.push({
+        name: String(t.name || this._inferStepName(t.note) || 'explore'),
+        args: t.args && typeof t.args === 'object' ? t.args : {},
+        note: String(t.note || t.name || '步骤'),
+        done: !!t.done
+      })
+    }
+    return steps
+  }
+
+  _inferStepName (note) {
+    const g = String(note || '').toLowerCase()
+    const map = [
+      [/木|房|屋|建造|build|house|tower|bridge|wall|shelter/, 'buildHouse'],
+      [/挖|矿|铁|金|钻石|mine|ore|iron|gold|diamond/, 'mineOreVein'],
+      [/砍|树|chop|tree|log|wood/, 'chopTree'],
+      [/捡|拾|收集|collect|pickup|drop/, 'collect'],
+      [/跟随|跟|follow/, 'follow'],
+      [/保护|守卫|protect|guard|defend/, 'protect'],
+      [/探|explore/, 'explore']
+    ]
+    for (const [re, name] of map) {
+      if (re.test(g)) return name
+    }
+    return 'explore'
+  }
+
+  pauseAiGoal () {
+    this.holdPosition = true
+    this.followTarget = null
+    this._clearFollowRetry()
+    if (this.plan && this.plan.status === 'running') this.plan.status = 'paused'
+    if (this.plan) this.plan.updatedAt = Date.now()
+    if (this.memory && this.plan) this.memory.setPlan(this.plan)
+    if (this.plan) this.agent.emit('aiPlan', { plan: this.plan, at: Date.now() })
+  }
+
+  resumeAiGoal () {
+    this.holdPosition = false
+    if (this.plan && this.plan.status === 'paused') this.plan.status = 'running'
+    if (this.plan) this.plan.updatedAt = Date.now()
+    if (this.memory && this.plan) this.memory.setPlan(this.plan)
+    if (this.plan) this.agent.emit('aiPlan', { plan: this.plan, at: Date.now() })
+  }
+
+  cancelAiGoal () {
+    this.holdPosition = false
+    this.followTarget = null
+    this._clearFollowRetry()
+    this.goal = '自由行动：观察环境，合理互动。'
+    this.plan = this._emptyPlan(this.goal)
+    this._lastPlanKey = ''
+    this._repeatStreak = 0
+    this._forceVary = false
+    this._pendingAssistant = null
+    this._pushHistory('user', '【任务取消】回到自由行动')
+    if (this.memory) this.memory.setGoal(this.goal, this.plan)
+    this.agent.emit('aiPlan', { plan: this.plan, at: Date.now() })
+  }
+
 
   setHold (hold = true) {
     this.holdPosition = !!hold
