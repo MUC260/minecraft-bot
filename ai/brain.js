@@ -7,6 +7,7 @@ const BrainMemory = require('./memory')
 
 const MAX_HISTORY_MESSAGES = 24
 const MAX_HISTORY_CHARS = 16000
+const SURVIVAL_COOLDOWN_MS = 4000
 
 class Brain {
   constructor (agent, config) {
@@ -28,6 +29,7 @@ class Brain {
     this.aiErrorStreak = 0
     this.aiBackoffMs = 0
     this._offlineStep = 0
+    this._lastSurvivalArmorAt = 0
     this.history = []
     this._pendingAssistant = null
     this._followRetryTimer = null
@@ -783,18 +785,19 @@ class Brain {
     const bot = state.bot || {}
     const health = Number(bot.health)
     const food = Number(bot.food)
+    const now = Date.now()
 
-    if (Number.isFinite(health) && health < 6) {
-      this.agent.emit('log', { level: 'warn', message: `生命值过低 (${health})，停止自由行动，先保命` })
-      return [{ name: 'eat', args: {} }]
+    // ???/????????????????????? LLM ??
+    if ((Number.isFinite(health) && health < 6) || (Number.isFinite(food) && food < 6)) {
+      if (now - this._lastSurvivalEatAt >= SURVIVAL_COOLDOWN_MS) {
+        this._lastSurvivalEatAt = now
+        this.agent.emit('log', { level: 'warn', message: `??/????? (health=${health}, food=${food})?????` })
+        return [{ name: 'eat', args: {} }]
+      }
+      return null
     }
 
-    if (Number.isFinite(food) && food < 6) {
-      this.agent.emit('log', { level: 'warn', message: `饥饿值过低 (${food})，先进食` })
-      return [{ name: 'eat', args: {} }]
-    }
-
-    // 有敌对生物且身上无武器/护甲时，先武装再应对
+    // ??????????????/????????????????? LLM
     const hostiles = Array.isArray(state.nearbyHostiles) ? state.nearbyHostiles : []
     const inventory = state.inventory
     const items = (inventory && Array.isArray(inventory.items)) ? inventory.items : []
@@ -803,9 +806,24 @@ class Brain {
       const n = String(i && i.name || '').toLowerCase()
       return n.includes('helmet') || n.includes('chestplate') || n.includes('leggings') || n.includes('boots')
     })
-    if (hostiles.length && !hasWeapon && !hasArmor) {
-      this.agent.emit('log', { level: 'warn', message: `附近有敌对生物且无武装，先装备` })
-      return [{ name: 'armor', args: {} }]
+
+    if (hostiles.length && !hasWeapon) {
+      if (hasArmor && now - this._lastSurvivalArmorAt >= SURVIVAL_COOLDOWN_MS) {
+        this._lastSurvivalArmorAt = now
+        this.agent.emit('log', { level: 'warn', message: `?????????????????????` })
+        return [{ name: 'armor', args: {} }]
+      }
+      if (!hasArmor && now - this._lastSurvivalAttackAt >= SURVIVAL_COOLDOWN_MS) {
+        this._lastSurvivalAttackAt = now
+        const hostile = hostiles[0]
+        const targetName = hostile && (hostile.name || hostile.type)
+        if (targetName) {
+          this.agent.emit('log', { level: 'warn', message: `?????????????? ${targetName}` })
+          return [{ name: 'attack', args: { name: targetName } }]
+        }
+        this.agent.emit('log', { level: 'warn', message: `????????????????` })
+        return [{ name: 'explore', args: { distance: 8 } }]
+      }
     }
 
     return null
