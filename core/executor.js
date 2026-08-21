@@ -140,14 +140,25 @@ class SkillExecutor extends EventEmitter {
 
   async _withTimeout (promise, timeoutMs, controller) {
     let timer
+    let timedOut = false
     const timeout = new Promise(resolve => {
       timer = setTimeout(() => {
+        timedOut = true
         controller.abort('skill timed out')
         resolve({ ok: false, reason: 'skill timed out', state: this._safeState() })
       }, timeoutMs)
     })
     try {
-      return await Promise.race([promise, timeout])
+      const result = await Promise.race([promise, timeout])
+      if (timedOut) {
+        // Let the aborted bot action settle briefly so the next skill does not
+        // interleave with a still-running craft/dig/pathfinder operation.
+        await Promise.race([
+          Promise.resolve(promise).catch(() => {}),
+          new Promise(resolve => setTimeout(resolve, 750))
+        ])
+      }
+      return result
     } finally {
       clearTimeout(timer)
     }

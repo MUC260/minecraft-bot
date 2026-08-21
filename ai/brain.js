@@ -8,6 +8,7 @@ const BrainMemory = require('./memory')
 const MAX_HISTORY_MESSAGES = 24
 const MAX_HISTORY_CHARS = 16000
 const SURVIVAL_COOLDOWN_MS = 4000
+const TERMINAL_BUILD_STEPS = new Set(['buildHouse', 'buildTower', 'buildBridge', 'buildWall', 'buildShelter'])
 
 class Brain {
   constructor (agent, config) {
@@ -36,6 +37,8 @@ class Brain {
     this._pendingAssistant = null
     this._followRetryTimer = null
     this.plan = this._emptyPlan(this.goal)
+    this._completionReported = false
+    this._completionReportedAt = 0
     this.systemPrompt = this._loadPrompt()
     this.memory = new BrainMemory(this.config.memoryFile || null, {
       maxMessages: this.config.memoryMaxMessages || MAX_HISTORY_MESSAGES,
@@ -167,6 +170,7 @@ class Brain {
       this._repeatStreak = 0
       this._forceVary = false
       this._pendingAssistant = null
+      this._completionReported = false
       this.plan = this.config.planAhead === false ? this._emptyPlan(text) : this._buildPlan(text)
       this._pushHistory('user', '【主人新任务】' + text)
       this._pushHistory('user', '【任务拆解】' + JSON.stringify(this.plan))
@@ -194,6 +198,7 @@ class Brain {
     this._repeatStreak = 0
     this._forceVary = false
     this._pendingAssistant = null
+    this._completionReported = false
     this._pushHistory('user', '【AI 计划】' + JSON.stringify(this.plan))
     if (this.memory) this.memory.setGoal(this.goal, this.plan)
     this.agent.emit('aiPlan', { plan: this.plan, at: Date.now() })
@@ -609,8 +614,14 @@ class Brain {
     } else {
       plan.activeStep = idx + 1
       if (plan.activeStep >= plan.steps.length) {
-        plan.status = 'complete'
-        plan.note = '任务步骤全部完成。'
+        const hasSkippedFailure = plan.steps.some(x => x && x.done && /连续失败/.test(String(x.note || '')))
+        if (hasSkippedFailure) {
+          plan.status = 'failed'
+          plan.note = '部分步骤因连续失败被跳过，任务未真正完成。'
+        } else {
+          plan.status = 'complete'
+          plan.note = '任务步骤全部完成。'
+        }
       } else {
         plan.note = '第 ' + (idx + 1) + ' 步完成；继续下一步。'
       }
@@ -635,6 +646,32 @@ class Brain {
       step.updatedAt = Date.now()
       const failLimit = Number(this.config.stepFailLimit) || 2
       if (step.failures >= failLimit) {
+        if (TERMINAL_BUILD_STEPS.has(step.name)) {
+          logger.warn(`步骤 ${step.name} 连续失败，回退到准备材料步骤，不标记任务完成: ${step.lastFailReason}`)
+          this.agent.emit('log', { level: 'warn', message: `步骤 ${step.name} 连续失败，回退到准备材料步骤，继续准备建材` })
+          step.failures = 0
+          step.lastFailReason = (result && result.reason) || '执行失败'
+          step.updatedAt = Date.now()
+          const PREP = new Set(['inventory', 'collect', 'craftPlanks', 'craft', 'craftGear'])
+          let prepIndex = -1
+          for (let i = 0; i < idx; i++) {
+            const before = plan.steps[i]
+            if (before && PREP.has(before.name)) {
+              if (prepIndex < 0) prepIndex = i
+              before.done = false
+              before.failures = 0
+              before.lastFailReason = ''
+            }
+          }
+          plan.activeStep = prepIndex >= 0 ? prepIndex : 0
+          plan.status = 'running'
+          plan.note = '建材不足，已回退重新准备材料。'
+          this._completionReported = false
+          plan.updatedAt = Date.now()
+          if (this.memory) this.memory.setPlan(plan)
+          this.agent.emit('aiPlan', { plan, at: Date.now() })
+          return true
+        }
         logger.warn(`步骤 ${step.name} 连续失败 ${step.failures} 次，自动跳过换方案: ${step.lastFailReason}`)
         this.agent.emit('log', { level: 'warn', message: `步骤 ${step.name} 连续失败，自动换方案` })
         step.done = true
@@ -676,10 +713,16 @@ class Brain {
 
     for (let i = idx; i < target; i++) {
       const before = plan.steps[i]
-      if (before && !before.done) {
-        before.done = true
-        before.note = (before.note || '') + '已由后续动作直接完成，自动跳过'
+      if (!before || before.done) continue
+      if (TERMINAL_BUILD_STEPS.has(before.name)) {
+        plan.activeStep = i
+        plan.updatedAt = Date.now()
+        if (this.memory) this.memory.setPlan(plan)
+        this.agent.emit('aiPlan', { plan, at: Date.now() })
+        return false
       }
+      before.done = true
+      before.note = (before.note || '') + '已由后续动作直接完成，自动跳过'
     }
     const targetStep = plan.steps[target]
     if (targetStep && !targetStep.done) {
@@ -1051,8 +1094,21 @@ actions 数组可以为空（如果只需要回复）。动作名必须是可用
     }
     const plan = this.plan
     if (plan && Array.isArray(plan.steps) && plan.steps.length) {
+      if (plan.status === 'failed') {
+        if (!this._completionReported) {
+          this._completionReported = true
+          this._completionReportedAt = Date.now()
+          return '部分步骤因连续失败被跳过，任务并未真正完成。请如实向主人报告一次当前进展、缺少什么条件，不要谎报完成；之后保持沉默，不要重复发言、不要空转。'
+        }
+        return '任务未完成（有步骤失败被跳过）。保持沉默，除非主人发新指令，否则不要发言、不要空转。'
+      }
       if (plan.status === 'complete') {
-        return '任务步骤已完成。请检查最终成果并在聊天中简短报告完成；若主人没有新指令，就原地待命，不要空转刷屏。'
+        if (!this._completionReported) {
+          this._completionReported = true
+          this._completionReportedAt = Date.now()
+          return '任务步骤已完成。请只通过 chat 工具向主人简短报告一次完成；之后原地待命，保持沉默，除非主人发新指令，禁止重复发言，禁止空转。'
+        }
+        return '任务已完成并已报告。原地待命，保持沉默，除非主人发新指令，否则不要发言、不要空转。'
       }
       if (plan.status === 'paused') {
         return '任务被主人暂停，原地待命，不要空转。'
