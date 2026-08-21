@@ -51,6 +51,32 @@ function mockBotForReactive () {
   assert(skill && skill.token, 'skill token should be granted after reactive release')
 }
 
+// 1b. A timeout carrying a partial path remains active until that route is walked.
+{
+  const bot = new EventEmitter()
+  bot.pathfinder = {
+    setMovements () {},
+    setGoal () {},
+    stop () {}
+  }
+  const owner = new PathfinderOwner(bot)
+  const skill = owner.acquire('skill', { reason: 'partial-timeout-test' })
+  owner.setGoal(skill.token, {})
+  bot.emit('path_update', { status: 'timeout', path: [{ x: 1, y: 64, z: 0 }] })
+  assert.strictEqual(owner.isIdle(), false, 'partial timeout path must not be discarded immediately')
+  bot.emit('path_update', { status: 'timeout', path: [] })
+  assert.strictEqual(owner.isIdle(), true, 'empty timeout path should mark pathfinder idle')
+  owner.setGoal(skill.token, {})
+  bot.emit('path_update', { status: 'noPath', path: [{ x: 1, y: 64, z: 0 }] })
+  assert.strictEqual(owner.isIdle(), false, 'noPath with a best-effort route must be walked before replanning')
+  bot.emit('path_update', { status: 'noPath', path: [] })
+  assert.strictEqual(owner.isIdle(), true, 'empty noPath should mark pathfinder idle')
+  const status = owner.status()
+  assert.strictEqual(status.lastPathStatus, 'noPath', 'pathfinder diagnostics should expose the last A* status')
+  assert.strictEqual(status.lastPathLength, 0, 'pathfinder diagnostics should expose the last path length')
+  skill.release()
+}
+
 // 2. Brain forces a varied instruction after repeated identical plans.
 {
   const executor = new EventEmitter()
@@ -192,6 +218,64 @@ function mockBotForReactive () {
   assert.strictEqual(nextExecutor.queue.length, 1)
   assert.strictEqual(nextExecutor.queue[0].name, 'follow')
   brain.destroy()
+}
+
+// 3d. Tool selection recognizes ordinary stone as pickaxe work.
+{
+  const combat = require('../lib/combat')
+  const woodenPickaxe = { name: 'wooden_pickaxe', type: 270, slot: 1 }
+  const woodenAxe = { name: 'wooden_axe', type: 271, slot: 2 }
+  assert.strictEqual(combat.toolForBlock('stone', [woodenAxe, woodenPickaxe]), woodenPickaxe)
+}
+
+// 3e. Unreachable drops enter a cross-action cooldown and become eligible again after moving.
+{
+  const { Vec3 } = require('vec3')
+  const actions = require('../core/actions')
+  const drop = {
+    id: 91,
+    name: 'item',
+    type: 'object',
+    isValid: true,
+    position: new Vec3(0, 72, 0),
+    getDroppedItem () { return { name: 'coal' } }
+  }
+  const bot = {
+    entity: { position: new Vec3(0, 64, 0) },
+    entities: { 91: drop }
+  }
+  assert.strictEqual(actions._test.nearestItemDrop(bot, 12).entity, drop)
+  actions._test.markDropPickupFailure(drop, 'height-gap', 60000)
+  assert.strictEqual(actions._test.nearestItemDrop(bot, 12), null, 'cooling-down drop must be skipped by the next collect action')
+  drop.position = new Vec3(0, 68, 0)
+  assert.strictEqual(actions._test.nearestItemDrop(bot, 12).entity, drop, 'a moved drop should be retried before cooldown expires')
+}
+
+// 3f. Observation drops are local; distant entities must not force autonomous collect.
+{
+  const observations = require('../core/observations')
+  const { Vec3 } = require('vec3')
+  const drop = {
+    id: 92,
+    name: 'item',
+    type: 'object',
+    position: new Vec3(30, 64, 0),
+    getDroppedItem () { return { name: 'coal' } }
+  }
+  const bot = {
+    username: 'Bot',
+    entity: { id: 1, position: new Vec3(0, 64, 0), yaw: 0, pitch: 0, onGround: true, distanceTo () { return 0 } },
+    players: {},
+    entities: { 92: drop },
+    inventory: { items () { return [] } },
+    health: 20,
+    food: 20,
+    foodSaturation: 5,
+    game: { gameMode: 0, dimension: 'overworld' },
+    time: { timeOfDay: 1000 }
+  }
+  const snapshot = observations.build(bot)
+  assert.strictEqual(snapshot.nearbyDrops.length, 0, 'distant item entities must not trigger collect')
 }
 
 // 4. ReactiveController refuses unsafe melee engagements.

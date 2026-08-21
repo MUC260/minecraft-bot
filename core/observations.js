@@ -1,4 +1,6 @@
-﻿const combat = require('../lib/combat')
+const combat = require('../lib/combat')
+const nearbyTargetsCache = new WeakMap()
+const snapshotCache = new WeakMap()
 
 const HOSTILE_NAMES = new Set([
   'zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'enderman',
@@ -25,21 +27,41 @@ function isHostileName (name) {
 
 function isDroppedItemEntity (entity) {
   if (!entity) return false
-  // Canonical mineflayer check first. Some entity getters are deprecated and
-  // can be misleading, but getDroppedItem() only succeeds for real item drops.
-  if (typeof entity.getDroppedItem === 'function') {
-    try {
-      if (entity.getDroppedItem()) return true
-    } catch {}
-  }
   const name = String(entity.name || '').toLowerCase()
   const type = String(entity.type || '').toLowerCase()
   const displayName = String(entity.displayName || '').toLowerCase()
   if (name === 'item' || name === 'item_stack') return true
-  // objectType is deprecated in prismarine-entity and prints a stack trace on
-  // every read. Older object entities can still be recognized by displayName.
   if (type === 'object' && (displayName === 'item' || displayName === 'item stack')) return true
-  return false
+  // Avoid calling getDroppedItem() for every mob/player in a large entity list.
+  // It is useful only for ambiguous object entities and dominated snapshots on
+  // servers with many tracked entities.
+  if (type !== 'object' || typeof entity.getDroppedItem !== 'function') return false
+  try { return !!entity.getDroppedItem() } catch { return false }
+}
+
+function dropPickupCoolingDown (entity, now = Date.now()) {
+  if (!entity || !Number.isFinite(Number(entity._pickupRetryAfter))) return false
+  const failedAt = entity._pickupFailurePosition
+  if (failedAt && entity.position) {
+    const dx = Number(entity.position.x) - Number(failedAt.x)
+    const dy = Number(entity.position.y) - Number(failedAt.y)
+    const dz = Number(entity.position.z) - Number(failedAt.z)
+    if (Number.isFinite(dx + dy + dz) && Math.sqrt(dx * dx + dy * dy + dz * dz) >= 2.5) {
+      delete entity._pickupRetryAfter
+      delete entity._pickupFailurePosition
+      delete entity._pickupFailureCount
+      delete entity._pickupFailureReason
+      return false
+    }
+  }
+  if (Number(entity._pickupRetryAfter) <= now) {
+    delete entity._pickupRetryAfter
+    delete entity._pickupFailurePosition
+    delete entity._pickupFailureCount
+    delete entity._pickupFailureReason
+    return false
+  }
+  return true
 }
 
 function relativeOffset (bot, entity) {
@@ -143,15 +165,55 @@ function nearbyTargets (bot, radius = 16, count = 20) {
   return out.slice(0, count)
 }
 
+function nearbyTargetsCached (bot, radius = 16, count = 20) {
+  const now = Date.now()
+  const cached = nearbyTargetsCache.get(bot)
+  if (cached && now - cached.at < 1200 && cached.radius === radius && cached.count === count) return cached.value
+  const value = nearbyTargets(bot, radius, count)
+  nearbyTargetsCache.set(bot, { at: now, radius, count, value })
+  return value
+}
+
+function pushNearest (list, entity, distance, limit) {
+  if (!Number.isFinite(distance)) return
+  let index = list.length
+  while (index > 0 && list[index - 1].distance > distance) index--
+  list.splice(index, 0, { entity, distance })
+  if (list.length > limit) list.pop()
+}
+
 function build (bot, chatBuffer) {
   if (!bot || !bot.entity) {
-    return { connected: false, bot: null, players: [], entities: [], nearbyHostiles: [], nearbyDrops: [], chat: [], inventory: null }
+    return { connected: false, bot: null, players: [], entities: [], nearbyHostiles: [], nearbyDrops: [], nearbyTargets: [], chat: [], inventory: null }
   }
-  const players = Object.values(bot.players || {}).filter(p => p && p.entity && p.entity.id !== bot.entity.id)
-  const entities = Object.values(bot.entities || {}).filter(e => e && e.id !== bot.entity.id)
-  const hostiles = entities.filter(e => isHostileName(e.name)).sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position))
-  const drops = entities.filter(isDroppedItemEntity).sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position))
-  return {
+
+  const now = Date.now()
+  const cached = snapshotCache.get(bot)
+  if (cached && now - cached.at < 200) return cached.value
+
+  const playerRows = []
+  for (const player of Object.values(bot.players || {})) {
+    if (!player || !player.entity || player.entity.id === bot.entity.id) continue
+    playerRows.push(player)
+    if (playerRows.length >= 8) break
+  }
+
+  const nearestEntities = []
+  const nearestHostiles = []
+  const nearestDrops = []
+  for (const entity of Object.values(bot.entities || {})) {
+    if (!entity || entity.id === bot.entity.id || entity.isValid === false || !entity.position) continue
+    let distance
+    try { distance = bot.entity.position.distanceTo(entity.position) } catch { continue }
+    if (!Number.isFinite(distance)) continue
+    pushNearest(nearestEntities, entity, distance, 12)
+    if (isHostileName(entity.name)) pushNearest(nearestHostiles, entity, distance, 8)
+    if (distance <= 24 && !dropPickupCoolingDown(entity) && isDroppedItemEntity(entity)) {
+      pushNearest(nearestDrops, entity, distance, 8)
+    }
+  }
+
+  const value = {
     connected: true,
     bot: {
       username: bot.username,
@@ -166,11 +228,11 @@ function build (bot, chatBuffer) {
       dimension: bot.game ? bot.game.dimension : null,
       timeOfDay: bot.time ? bot.time.timeOfDay : null
     },
-    players: players.slice(0, 8).map(p => playerInfo(bot, p)),
-    entities: entities.slice(0, 12).map(e => entityInfo(bot, e)),
-    nearbyHostiles: hostiles.slice(0, 8).map(e => entityInfo(bot, e)),
-    nearbyDrops: drops.slice(0, 8).map(e => entityInfo(bot, e)),
-    nearbyTargets: nearbyTargets(bot),
+    players: playerRows.map(p => playerInfo(bot, p)),
+    entities: nearestEntities.map(row => entityInfo(bot, row.entity)),
+    nearbyHostiles: nearestHostiles.map(row => entityInfo(bot, row.entity)),
+    nearbyDrops: nearestDrops.map(row => entityInfo(bot, row.entity)),
+    nearbyTargets: nearbyTargetsCached(bot),
     chat: Array.isArray(chatBuffer)
       ? chatBuffer
           .filter(item => !item || String(item.username || '').toLowerCase() !== String(bot.username || '').toLowerCase())
@@ -178,6 +240,8 @@ function build (bot, chatBuffer) {
       : [],
     inventory: inventoryInfo(bot)
   }
+  snapshotCache.set(bot, { at: now, value })
+  return value
 }
 
 module.exports = { build, inventoryInfo, HOSTILE_NAMES, isHostileName, isDroppedItemEntity }

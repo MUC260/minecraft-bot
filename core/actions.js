@@ -83,28 +83,68 @@ function getBlock (bot, x, y, z) {
 }
 
 function isDroppedItemEntity (bot, entity) {
-  if (!entity || entity === bot.entity) return false
-  // Canonical mineflayer check first. Some entity getters are deprecated and
-  // can be misleading, but getDroppedItem() only succeeds for real item drops.
-  if (typeof entity.getDroppedItem === 'function') {
-    try {
-      if (entity.getDroppedItem()) return true
-    } catch {}
-  }
+  if (!entity) return false
   const name = String(entity.name || '').toLowerCase()
   const type = String(entity.type || '').toLowerCase()
   const displayName = String(entity.displayName || '').toLowerCase()
   if (name === 'item' || name === 'item_stack') return true
-  // objectType is deprecated in prismarine-entity and prints a stack trace on
-  // every read. Older object entities can still be recognized by displayName.
   if (type === 'object' && (displayName === 'item' || displayName === 'item stack')) return true
-  return false
+  if (type !== 'object' || typeof entity.getDroppedItem !== 'function') return false
+  try { return !!entity.getDroppedItem() } catch { return false }
 }
 
-function nearestItemDrop (bot, radius) {
+function dropFailureMoved (entity) {
+  const failedAt = entity && entity._pickupFailurePosition
+  if (!failedAt || !entity.position) return false
+  const dx = Number(entity.position.x) - Number(failedAt.x)
+  const dy = Number(entity.position.y) - Number(failedAt.y)
+  const dz = Number(entity.position.z) - Number(failedAt.z)
+  return Number.isFinite(dx + dy + dz) && Math.sqrt(dx * dx + dy * dy + dz * dz) >= 2.5
+}
+
+function dropPickupCoolingDown (entity, now = Date.now()) {
+  if (!entity || !Number.isFinite(Number(entity._pickupRetryAfter))) return false
+  if (dropFailureMoved(entity) || Number(entity._pickupRetryAfter) <= now) {
+    delete entity._pickupRetryAfter
+    delete entity._pickupFailurePosition
+    delete entity._pickupFailureCount
+    delete entity._pickupFailureReason
+    return false
+  }
+  return true
+}
+
+function markDropPickupFailure (entity, reason, baseCooldownMs = 45000) {
+  if (!entity) return
+  const previous = dropPickupCoolingDown(entity) ? Number(entity._pickupFailureCount || 0) : 0
+  const count = Math.max(1, previous + 1)
+  const delay = Math.min(180000, Math.max(5000, Number(baseCooldownMs) || 45000) * count)
+  entity._pickupRetryAfter = Date.now() + delay
+  entity._pickupFailureCount = count
+  entity._pickupFailureReason = String(reason || 'unreachable')
+  if (entity.position) {
+    entity._pickupFailurePosition = {
+      x: Number(entity.position.x),
+      y: Number(entity.position.y),
+      z: Number(entity.position.z)
+    }
+  }
+}
+
+function clearDropPickupFailure (entity) {
+  if (!entity) return
+  delete entity._pickupRetryAfter
+  delete entity._pickupFailurePosition
+  delete entity._pickupFailureCount
+  delete entity._pickupFailureReason
+}
+
+function nearestItemDrop (bot, radius, excludedIds = null) {
   let best = null
   for (const entity of Object.values(bot.entities || {})) {
     if (!isDroppedItemEntity(bot, entity)) continue
+    if (excludedIds && excludedIds.has(entity.id)) continue
+    if (dropPickupCoolingDown(entity)) continue
     if (entity.isValid === false) continue
     if (!entity.position || !bot.entity || !bot.entity.position) continue
     const dist = bot.entity.position.distanceTo(entity.position)
@@ -135,13 +175,15 @@ function findNearestBlock (bot, args) {
   }
   if (!positions || !positions.length) return null
   let best = null
+  let bestVisible = null
   for (const pos of positions) {
     const block = bot.blockAt(pos)
     if (!block) continue
     const dist = bot.entity.position.distanceTo(block.position)
+    if (blockVisible(bot, block) && (!bestVisible || dist < bestVisible.distance)) bestVisible = { block, distance: dist }
     if (!best || dist < best.distance) best = { block, distance: dist }
   }
-  return best ? best.block : null
+  return (bestVisible || best || {}).block || null
 }
 
 function lowerBlockName (block) {
@@ -279,6 +321,26 @@ function oreYieldCount (bot, requestedName) {
   }, 0)
 }
 
+function trackedYieldCount (bot, blockName) {
+  const name = String(blockName || '').toLowerCase()
+  if (!name) return null
+  if (name.endsWith('_ore') || name === 'ancient_debris') return oreYieldCount(bot, name)
+  if (name === 'stone') return countItemByName(bot, 'cobblestone')
+  if (name === 'deepslate') return countItemByName(bot, 'cobbled_deepslate')
+  return null
+}
+
+async function waitForTrackedYield (bot, blockName, before, ctx, timeoutMs) {
+  const deadline = Date.now() + Math.max(100, timeoutMs)
+  while (Date.now() < deadline) {
+    throwIfAborted(ctx)
+    const gained = trackedYieldCount(bot, blockName) - before
+    if (gained > 0) return gained
+    await sleep(100, ctx)
+  }
+  return trackedYieldCount(bot, blockName) - before
+}
+
 function isCollectibleLike (block) {
   const n = lowerBlockName(block)
   if (!n) return false
@@ -286,6 +348,28 @@ function isCollectibleLike (block) {
   if (n === 'pumpkin' || n === 'melon' || n === 'sugar_cane' || n === 'cactus' || n === 'bamboo') return true
   if (n === 'wheat' || n === 'carrots' || n === 'potatoes' || n === 'beetroots' || n === 'nether_wart' || n === 'cocoa' || n === 'sweet_berry_bush') return true
   return false
+}
+
+function harvestToolCandidate (bot, block) {
+  if (!bot || !block) return null
+  try {
+    return combat.toolForBlock(block.name, bot.inventory?.items?.() || []) || bot.heldItem || null
+  } catch {
+    return bot.heldItem || null
+  }
+}
+
+function canHarvestBlock (bot, block) {
+  if (!block || typeof block.canHarvest !== 'function') return true
+  const tool = harvestToolCandidate(bot, block)
+  try { return !!block.canHarvest(tool ? tool.type : null) } catch { return true }
+}
+
+async function equipForHarvest (bot, block) {
+  try { await combat.equipBestToolForBlock(bot, block.name) } catch {}
+  if (canHarvestBlock(bot, block)) return true
+  const held = bot.heldItem && bot.heldItem.name ? bot.heldItem.name : '\u7a7a\u624b'
+  throw new Error(`\u7f3a\u5c11\u80fd\u91c7\u96c6 ${block.name} \u7684\u5de5\u5177\uff08\u5f53\u524d\uff1a${held}\uff09\uff0c\u5df2\u505c\u6b62\u6316\u6398\u4ee5\u514d\u7834\u574f\u65b9\u5757\u5374\u6ca1\u6709\u6389\u843d\u7269`)
 }
 
 function findNearestBlockBy (bot, predicate, radius = 12, count = 128) {
@@ -316,6 +400,65 @@ function findNearestBlockBy (bot, predicate, radius = 12, count = 128) {
     if (!best || dist < best.distance) best = { block, distance: dist }
   }
   return (bestVisible || best || {}).block || null
+}
+
+function probePathResult (bot, movements, goal, timeoutMs = 100) {
+  if (!bot?.pathfinder || !movements || !bot.entity?.position || typeof bot.pathfinder.getPathFromTo !== 'function') return null
+  try {
+    const generator = bot.pathfinder.getPathFromTo(movements, bot.entity.position, goal, {
+      timeout: Math.max(25, timeoutMs),
+      tickTimeout: Math.min(20, Math.max(5, timeoutMs)),
+      searchRadius: Math.min(12, Math.max(6, Number(bot.pathfinder.searchRadius) || 12)),
+      optimizePath: true,
+      resetEntityIntersects: false
+    })
+    const next = generator.next()
+    return next && next.value ? next.value.result : null
+  } catch {
+    return null
+  }
+}
+
+async function findReachableBlockBy (bot, predicate, radius = 16, count = 128, maxChecks = 10) {
+  if (!bot.findBlocks || !bot.entity) return null
+  let positions = []
+  try {
+    positions = bot.findBlocks({
+      matching: block => {
+        try { return !!predicate(block) } catch { return false }
+      },
+      maxDistance: radius,
+      count
+    }) || []
+  } catch {
+    return null
+  }
+
+  const candidates = positions
+    .map(pos => bot.blockAt(pos))
+    .filter(Boolean)
+    .map(block => ({
+      block,
+      distance: bot.entity.position.distanceTo(block.position),
+      visible: blockVisible(bot, block)
+    }))
+    .sort((a, b) => Number(b.visible) - Number(a.visible) || a.distance - b.distance)
+
+  for (const candidate of candidates.slice(0, Math.max(1, maxChecks))) {
+    if (candidate.distance <= 3.5 && candidate.visible) return candidate.block
+    try {
+      const movements = bot.pathfinder && bot.pathfinder.movements
+      if (!movements || typeof bot.pathfinder.getPathTo !== 'function') continue
+      // This is only a cheap candidate probe.  A long synchronous A* probe here
+      // blocks Express, physics and chat, and was a major source of apparent
+      // freezes when ten mountain candidates were checked in one tick.
+      const goal = new goals.GoalNear(candidate.block.position.x, candidate.block.position.y, candidate.block.position.z, 2.5)
+      const result = probePathResult(bot, movements, goal, 100)
+      if (result && (result.status === 'success' || (Array.isArray(result.path) && result.path.length >= 2))) return candidate.block
+      await Promise.resolve()
+    } catch {}
+  }
+  return null
 }
 
 function findNearestHostile (bot, radius = 16) {
@@ -595,7 +738,22 @@ async function placeSpecificBlockNearby (bot, ctx, itemName) {
   const offsets = [[dx, 0, dz], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [-dx, 0, -dz]]
   for (const [ox, oy, oz] of offsets) {
     const pos = new Vec3(Math.floor(here.x) + ox, y + oy, Math.floor(here.z) + oz)
-    const block = bot.blockAt(pos)
+    let block = bot.blockAt(pos)
+    if (!block) continue
+    if (block.boundingBox !== 'empty') {
+      const name = lowerBlockName(block)
+      if (block.diggable === false || name === 'bedrock' || name.includes('water') || name.includes('lava')) continue
+      try {
+        await equipForHarvest(bot, block)
+        await raceWithAbort(bot.dig(block, true), ctx, () => {
+          if (typeof bot.stopDigging === 'function') bot.stopDigging()
+        })
+        await sleep(150, ctx)
+        block = bot.blockAt(pos)
+      } catch {
+        continue
+      }
+    }
     if (!block || block.boundingBox !== 'empty') continue
     const support = findBuildSupport(bot, pos)
     if (!support) continue
@@ -687,24 +845,67 @@ async function craftPlanksFromLog (bot, logItem, need, ctx) {
   return true
 }
 
-async function pickupNearbyDrops (bot, ctx, radius = 8) {
-  // Keep looking for a new nearest drop after each attempt. Dropped items can
-  // spawn/despawn while we walk, so a single snapshot is not enough.
-  for (let i = 0; i < 24; i++) {
+async function clearPathToDrop (bot, entityId, ctx, maxBlocks = 4) {
+  for (let i = 0; i < maxBlocks; i++) {
     throwIfAborted(ctx)
-    const drop = nearestItemDrop(bot, radius)
-    if (!drop) return true
+    const entity = Object.values(bot.entities || {}).find(e => e && e.id === entityId)
+    if (!entity || !entity.position) return true
+    if (bot.entity.position.distanceTo(entity.position) <= 1.2) return true
+    try { await bot.lookAt(entity.position.offset(0, 0.15, 0), true) } catch {}
+    await sleep(80, ctx)
+    const obstruction = firstSolidBlockToward(bot, entity.position.offset(0, 0.15, 0), 4.5)
+    if (!obstruction || obstruction.diggable === false || obstruction.name === 'bedrock') return false
+    try {
+      await equipForHarvest(bot, obstruction)
+      await raceWithAbort(bot.dig(obstruction, true), ctx, () => {
+        if (typeof bot.stopDigging === 'function') bot.stopDigging()
+      })
+      await sleep(350, ctx)
+    } catch {
+      return false
+    }
+  }
+  return false
+}
+
+async function pickupNearbyDrops (bot, ctx, radius = 8) {
+  const deadline = Date.now() + 12000
+  const failedIds = new Set()
+  const outcome = { collected: 0, skipped: 0, attempted: 0 }
+
+  for (let i = 0; i < 12 && Date.now() < deadline; i++) {
+    throwIfAborted(ctx)
+    const drop = nearestItemDrop(bot, radius, failedIds)
+    if (!drop) return outcome
 
     const entity = drop.entity
     const id = entity && entity.id
+    outcome.attempted++
+
+    const fail = (reason) => {
+      if (id != null) failedIds.add(id)
+      markDropPickupFailure(entity, reason)
+      outcome.skipped++
+    }
+
     if (drop.distance > 2.5) {
-      const nav = await pathNearXZ(bot, ctx, entity.position.x, entity.position.z, 1.2, 20000)
+      const remaining = Math.max(1000, deadline - Date.now())
+      const heightGap = Math.abs(Number(entity.position.y) - Number(bot.entity.position.y))
+      const navTimeout = Math.min(6000, remaining)
+      // GoalNearXZ ignores height. It can report success while the item is many
+      // blocks above/below, causing every autonomous tick to chase the same drop.
+      const nav = heightGap > 2.25
+        ? await pathNear(bot, ctx, entity.position.x, entity.position.y, entity.position.z, 1.25, navTimeout)
+        : await pathNearXZ(bot, ctx, entity.position.x, entity.position.z, 1.2, navTimeout)
       if (nav && nav.preempted) return nav
-      if (nav && !nav.ok) continue
+      if (nav && !nav.ok) {
+        fail(heightGap > 2.25 ? 'height-gap:' + (nav.reason || 'unreachable') : (nav.reason || 'unreachable'))
+        continue
+      }
     }
 
     let collected = false
-    for (let j = 0; j < 25; j++) {
+    for (let j = 0; j < 15 && Date.now() < deadline; j++) {
       throwIfAborted(ctx)
       await sleep(100, ctx)
       const stillThere = Object.values(bot.entities || {}).some(e => e && e.id === id)
@@ -715,23 +916,137 @@ async function pickupNearbyDrops (bot, ctx, radius = 8) {
       const current = Object.values(bot.entities || {}).find(e => e && e.id === id)
       if (current && bot.entity.position.distanceTo(current.position) > 2.5) break
     }
-    if (collected) continue
+    if (collected) {
+      clearDropPickupFailure(entity)
+      outcome.collected++
+      continue
+    }
 
-    if (entity && bot.entity.position.distanceTo(entity.position) > 1.2) {
-      const nav = await pathNearXZ(bot, ctx, entity.position.x, entity.position.z, 1.0, 15000)
-      if (nav && nav.preempted) return nav
-      if (nav && !nav.ok) continue
+    let current = Object.values(bot.entities || {}).find(e => e && e.id === id)
+    if (current && Date.now() < deadline) {
+      const heightGap = Math.abs(Number(current.position.y) - Number(bot.entity.position.y))
+
+      // Drops from mined blocks can fall into the freshly opened shaft. Open a
+      // short direct route only for nearby gaps; large cliffs are cooled down.
+      if (bot.entity.position.distanceTo(current.position) <= 6.5 && heightGap <= 6) {
+        await clearPathToDrop(bot, id, ctx, 6)
+        current = Object.values(bot.entities || {}).find(e => e && e.id === id)
+      }
+
+      if (current && Date.now() < deadline) {
+        const remaining = Math.max(800, deadline - Date.now())
+        const nav = await pathNear(bot, ctx, current.position.x, current.position.y, current.position.z, 0.7, Math.min(4000, remaining))
+        if (nav && nav.preempted) return nav
+        if (nav && nav.ok) {
+          for (let j = 0; j < 10 && Date.now() < deadline; j++) {
+            await sleep(100, ctx)
+            const stillThere = Object.values(bot.entities || {}).some(e => e && e.id === id)
+            if (!stillThere) {
+              collected = true
+              break
+            }
+          }
+        }
+      }
+
+      let close = Object.values(bot.entities || {}).find(e => e && e.id === id)
+      // GoalNear works on floored block coordinates and may stop at the edge of
+      // the pickup radius. Walk the final fraction only when vertical alignment
+      // is close enough; otherwise forward motion can walk off a ledge.
+      if (!collected && close && bot.entity.position.distanceTo(close.position) <= 3 && Math.abs(close.position.y - bot.entity.position.y) <= 1.75) {
+        try { await bot.lookAt(close.position.offset(0, 0.2, 0), true) } catch {}
+        bot.setControlState('forward', true)
+        try {
+          for (let j = 0; j < 12 && Date.now() < deadline; j++) {
+            await sleep(100, ctx)
+            const stillThere = Object.values(bot.entities || {}).some(e => e && e.id === id)
+            if (!stillThere) {
+              collected = true
+              break
+            }
+          }
+        } finally {
+          bot.setControlState('forward', false)
+        }
+      }
+    }
+
+    if (collected) {
+      clearDropPickupFailure(entity)
+      outcome.collected++
+    } else {
+      fail('pickup-not-confirmed')
     }
   }
-  return true
+  return outcome
+}
+
+async function digReachableTree (bot, start, ctx, limit = 48) {
+  const queue = [new Vec3(Math.floor(start.x), Math.floor(start.y), Math.floor(start.z))]
+  const seen = new Set(queue.map(bkey))
+  let dug = 0
+
+  while (queue.length && dug < limit) {
+    throwIfAborted(ctx)
+    queue.sort((a, b) => bot.entity.position.distanceTo(a) - bot.entity.position.distanceTo(b))
+    const pos = queue.shift()
+    const block = bot.blockAt(pos)
+    if (!block || !isLogLike(block)) continue
+
+    let distance = bot.entity.position.distanceTo(block.position)
+    if (distance > 4.5 && dug === 0) {
+      const nav = await pathNear(bot, ctx, block.position.x, block.position.y, block.position.z, 2.5, 20000)
+      if (nav && nav.preempted) return { preempted: true, reason: nav.reason }
+      if (nav && !nav.ok) throw new Error(nav.reason || '\u65e0\u6cd5\u5230\u8fbe\u6811\u6728')
+      distance = bot.entity.position.distanceTo(block.position)
+    }
+    // Tall trunks can extend beyond normal digging reach. Finish every log that
+    // is actually reachable, then return instead of pathing forever toward air.
+    if (distance > 4.5) continue
+
+    try { await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true) } catch {}
+    await sleep(80, ctx)
+    await equipForHarvest(bot, block)
+    await raceWithAbort(bot.dig(block, true), ctx, () => {
+      if (typeof bot.stopDigging === 'function') bot.stopDigging()
+    })
+    dug++
+
+    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+    for (const [dx, dy, dz] of dirs) {
+      const next = pos.offset(dx, dy, dz)
+      const key = bkey(next)
+      if (seen.has(key)) continue
+      seen.add(key)
+      const neighbour = bot.blockAt(next)
+      if (neighbour && isLogLike(neighbour)) queue.push(next)
+    }
+  }
+  return { dug, preempted: false }
 }
 
 async function chopOneTree (bot, ctx, maxBlocks = 48, radius = 16) {
-  const block = findNearestBlockBy(bot, isLogLike, radius, 128)
-  if (!block) throw new Error('附近没有可砍的树木')
+  let block = null
+  for (let attempt = 0; attempt < 3 && !block; attempt++) {
+    block = await findReachableBlockBy(bot, isLogLike, radius, 128, 10)
+    if (block || attempt >= 2) break
+    const distance = 7 + attempt * 3
+    const angle = Math.random() * Math.PI * 2
+    const nav = await pathNearXZ(
+      bot,
+      ctx,
+      bot.entity.position.x + Math.sin(angle) * distance,
+      bot.entity.position.z + Math.cos(angle) * distance,
+      2,
+      12000
+    )
+    if (nav && nav.preempted) return nav
+  }
+  if (!block) throw new Error('\u9644\u8fd1\u6ca1\u6709\u53ef\u5230\u8fbe\u7684\u6811\u6728\uff0c\u5df2\u5c1d\u8bd5\u6362\u65b9\u5411\u63a2\u7d22')
   try { await combat.equipBestToolForBlock(bot, block.name) } catch {}
-  const result = await digConnected(bot, block.position, isLogLike, ctx, maxBlocks)
+  const result = await digReachableTree(bot, block.position, ctx, maxBlocks)
   if (result.preempted) return result
+  if (!result.dug) throw new Error('\u627e\u5230\u4e86\u6811\u6728\uff0c\u4f46\u5f53\u524d\u89d2\u5ea6\u6216\u5730\u5f62\u4e0b\u65e0\u6cd5\u6316\u5230\u539f\u6728')
   const picked = await pickupNearbyDrops(bot, ctx)
   if (picked && picked.preempted) return picked
   return result
@@ -743,7 +1058,7 @@ async function exploreForBuildResources (bot, ctx, attempts = 3) {
     const angle = Math.random() * Math.PI * 2
     const x = bot.entity.position.x + Math.sin(angle) * distance
     const z = bot.entity.position.z + Math.cos(angle) * distance
-    const nav = await pathNearXZ(bot, ctx, x, z, 2, 45000)
+    const nav = await pathNearXZ(bot, ctx, x, z, 2, 12000)
     if (nav && nav.preempted) return nav
     if (nav && !nav.ok) continue
     return true
@@ -818,8 +1133,8 @@ async function digConnected (bot, start, predicate, ctx, limit = 64, options = {
     const dist = bot.entity.position.distanceTo(block.position)
     if (dist > 3.5 && !(options.threeDimensional && !blockVisible(bot, block))) {
       const nav = options.threeDimensional
-        ? await pathNear(bot, ctx, block.position.x, block.position.y, block.position.z, 2.5, 45000)
-        : await pathNearXZ(bot, ctx, block.position.x, block.position.z, 2.5, 45000)
+        ? await pathNear(bot, ctx, block.position.x, block.position.y, block.position.z, 2.5, 30000)
+        : await pathNear(bot, ctx, block.position.x, block.position.y, block.position.z, 2.5, 20000)
       if (nav && nav.preempted) return { preempted: true, reason: nav.reason || 'reactive preempt' }
       if (nav && !nav.ok) throw new Error(nav.reason || 'unable to reach target block')
     }
@@ -835,7 +1150,7 @@ async function digConnected (bot, start, predicate, ctx, limit = 64, options = {
       }
     }
 
-    try { await combat.equipBestToolForBlock(bot, block.name) } catch {}
+    await equipForHarvest(bot, block)
     await raceWithAbort(bot.dig(block, true), ctx, () => {
       if (typeof bot.stopDigging === 'function') bot.stopDigging()
     })
@@ -1392,13 +1707,33 @@ function setPathfinderGoal (bot, acq, goal, { movements, dynamic = false } = {})
   return { ok: true }
 }
 
+function goalSatisfied (bot) {
+  const goal = bot && bot.pathfinder && bot.pathfinder.goal
+  const position = bot && bot.entity && bot.entity.position
+  if (!goal || !position || typeof goal.isEnd !== 'function') return false
+  try {
+    const floored = position.floored()
+    return goal.isEnd(floored) || goal.isEnd(floored.offset(0, 1, 0))
+  } catch {
+    return false
+  }
+}
+
 function waitForGoal (bot, ctx, timeoutMs = 60000) {
   return new Promise(resolve => {
     let settled = false
     let timer = null
+    let poll = null
+    let partialPathAt = 0
+    let partialStatus = ''
+    let sawPathAt = 0
+    let lastPathStatus = ''
+    let lastMotionAt = Date.now()
+    let lastPosition = bot.entity?.position?.clone?.() || null
 
     const cleanup = () => {
       if (timer) clearTimeout(timer)
+      if (poll) clearInterval(poll)
       bot.removeListener('goal_reached', onGoal)
       bot.removeListener('path_update', onPath)
       if (ctx?.signal) ctx.signal.removeEventListener('abort', onAbort)
@@ -1411,7 +1746,27 @@ function waitForGoal (bot, ctx, timeoutMs = 60000) {
     }
     const onGoal = () => finish('reached')
     const onPath = (r) => {
-      if (r && (r.status === 'noPath' || r.status === 'timeout')) finish(r.status)
+      if (!r) return
+      const hasUsablePath = Array.isArray(r.path) && r.path.length > 0
+      sawPathAt = Date.now()
+      lastPathStatus = String(r.status || '')
+      if ((r.status === 'partial' || r.status === 'timeout' || r.status === 'noPath') && hasUsablePath) {
+        // Let the bot walk the best partial path before replanning. Previously a
+        // timeout/noPath result was stopped immediately, so mountainous routes failed
+        // without using the path that A* had already found.
+        partialPathAt = Date.now()
+        partialStatus = r.status
+        return
+      }
+      if (r.status === 'noPath') {
+        finish('noPath')
+        return
+      }
+      // An empty timeout means the bounded A* slice did not reach even a
+      // useful node yet.  Do not report failure immediately: the pathfinder
+      // can replan from the same position on the next tick.  The caller has a
+      // finite retry budget, so an actually impossible route still exits.
+      if (r.status === 'timeout') finish('timeout', { retryable: !hasUsablePath })
     }
     const onAbort = () => finish('preempted')
 
@@ -1424,44 +1779,158 @@ function waitForGoal (bot, ctx, timeoutMs = 60000) {
       }
       ctx.signal.addEventListener('abort', onAbort, { once: true })
     }
+
+    poll = setInterval(() => {
+      if (goalSatisfied(bot)) {
+        finish('reached')
+        return
+      }
+      const now = Date.now()
+      const currentPosition = bot.entity?.position
+      if (lastPosition && currentPosition) {
+        const moved = currentPosition.distanceTo(lastPosition)
+        if (moved >= 0.18) {
+          lastMotionAt = now
+          lastPosition = currentPosition.clone()
+        }
+      }
+      let moving = false
+      try { moving = !!bot.pathfinder.isMoving() } catch {}
+      if (partialPathAt && !moving && now - partialPathAt >= 750) {
+        finish('partial', { status: partialStatus, retryable: true })
+        return
+      }
+      // A path can be computed successfully yet remain stuck on its first
+      // movement node (water edge, fence, stale block update, etc.). Waiting
+      // the full action timeout only repeats the same failure. Replan quickly
+      // from the live position and let the caller try another direction.
+      if (sawPathAt && now - sawPathAt >= 1000 && now - lastMotionAt >= 2800) {
+        finish('stalled', { status: lastPathStatus, retryable: true })
+      }
+    }, 100)
     timer = setTimeout(() => finish('timeout'), timeoutMs)
   })
 }
 
+function horizontalDistanceTo (bot, x, z) {
+  const dx = Number(bot.entity.position.x) - Number(x)
+  const dz = Number(bot.entity.position.z) - Number(z)
+  return Math.sqrt(dx * dx + dz * dz)
+}
+
+function spatialDistanceTo (bot, x, y, z) {
+  const dx = Number(bot.entity.position.x) - Number(x)
+  const dy = Number(bot.entity.position.y) - Number(y)
+  const dz = Number(bot.entity.position.z) - Number(z)
+  return Math.sqrt(dx * dx + dy * dy + dz * dz)
+}
+
+function localWaypointXZ (bot, x, z, maxStep = 6) {
+  const p = bot.entity.position
+  const dx = Number(x) - Number(p.x)
+  const dz = Number(z) - Number(p.z)
+  const distance = Math.hypot(dx, dz)
+  if (!Number.isFinite(distance) || distance <= maxStep) return { x: Number(x), z: Number(z), final: true }
+  return {
+    x: Number(p.x) + dx / distance * maxStep,
+    z: Number(p.z) + dz / distance * maxStep,
+    final: false
+  }
+}
+
+function localWaypoint3D (bot, x, y, z, maxStep = 6) {
+  const p = bot.entity.position
+  const dx = Number(x) - Number(p.x)
+  const dy = Number(y) - Number(p.y)
+  const dz = Number(z) - Number(p.z)
+  const distance = Math.sqrt(dx * dx + dy * dy + dz * dz)
+  if (!Number.isFinite(distance) || distance <= maxStep) {
+    return { x: Number(x), y: Number(y), z: Number(z), final: true }
+  }
+  const horizontal = Math.hypot(dx, dz)
+  const horizontalScale = horizontal > 0.01 ? Math.min(1, maxStep / horizontal) : 0
+  return {
+    x: Number(p.x) + dx * horizontalScale,
+    y: Number(p.y) + Math.max(-2, Math.min(2, dy * Math.max(horizontalScale, 0.35))),
+    z: Number(p.z) + dz * horizontalScale,
+    final: false
+  }
+}
+
 async function pathNearXZ (bot, ctx, x, z, range = 2.5, timeoutMs = 60000) {
-  if (!bot.pathfinder) throw new Error('pathfinder 未加载')
+  if (!bot.pathfinder) throw new Error('pathfinder \u672a\u52a0\u8f7d')
   const acquired = acquirePathfinder(bot, ctx, 'navigate-xz')
   if (!acquired.ok) return acquired
   const acq = acquired.acq
+  const deadline = Date.now() + Math.max(1000, timeoutMs)
+  let bestDistance = horizontalDistanceTo(bot, x, z)
+  let lastReason = '\u5bfb\u8def\u672a\u5b8c\u6210'
+  let stagnantRetries = 0
+  const maxSegments = Math.max(4, Math.min(16, Math.ceil(bestDistance / 5) + 4))
   try {
-    const goal = new goals.GoalNearXZ(x, z, range)
-    const installed = setPathfinderGoal(bot, acq, goal)
-    if (!installed.ok) return { ok: false, reason: installed.reason }
-    const r = await waitForGoal(bot, ctx, timeoutMs)
-    if (r.kind === 'preempted') return { preempted: true, reason: 'reactive 抢占路径' }
-    if (r.kind === 'reached') return { ok: true }
-    if (r.kind === 'noPath' || r.kind === 'timeout') return { ok: false, reason: '寻路失败: ' + r.kind }
-    return { ok: false, reason: '寻路未完成: ' + r.kind }
+    for (let attempt = 0; attempt < maxSegments && Date.now() < deadline; attempt++) {
+      const remaining = Math.max(500, deadline - Date.now())
+      const waypoint = localWaypointXZ(bot, x, z, 6)
+      const goalRange = waypoint.final ? range + Math.min(1, attempt * 0.15) : 1.25
+      const goal = new goals.GoalNearXZ(waypoint.x, waypoint.z, goalRange)
+      const installed = setPathfinderGoal(bot, acq, goal)
+      if (!installed.ok) return { ok: false, reason: installed.reason }
+      const r = await waitForGoal(bot, ctx, Math.min(7000, remaining))
+      if (r.kind === 'preempted') return { preempted: true, reason: 'reactive \u62a2\u5360\u8def\u5f84' }
+      const currentDistance = horizontalDistanceTo(bot, x, z)
+      if (currentDistance <= range + 0.8) return { ok: true }
+      const progress = bestDistance - currentDistance
+      bestDistance = Math.min(bestDistance, currentDistance)
+      lastReason = '\u5bfb\u8def\u5931\u8d25: ' + r.kind
+      if (progress >= 0.35 && Date.now() + 500 < deadline) {
+        stagnantRetries = 0
+        continue
+      }
+      if ((r.kind === 'reached' || r.retryable) && ++stagnantRetries <= 1 && Date.now() + 500 < deadline) continue
+      return { ok: false, reason: lastReason }
+    }
+    return bestDistance <= range + 0.8 ? { ok: true } : { ok: false, reason: lastReason }
   } finally {
+    if (bot.pathfinder.movements) bot.pathfinder.movements.canDig = false
     acq.release()
   }
 }
 
 async function pathNear (bot, ctx, x, y, z, range = 1, timeoutMs = 60000) {
-  if (!bot.pathfinder) throw new Error('pathfinder 未加载')
+  if (!bot.pathfinder) throw new Error('pathfinder \u672a\u52a0\u8f7d')
   const acquired = acquirePathfinder(bot, ctx, 'navigate')
   if (!acquired.ok) return acquired
   const acq = acquired.acq
+  const deadline = Date.now() + Math.max(1000, timeoutMs)
+  let bestDistance = spatialDistanceTo(bot, x, y, z)
+  let lastReason = '\u5bfb\u8def\u672a\u5b8c\u6210'
+  let stagnantRetries = 0
+  const maxSegments = Math.max(4, Math.min(16, Math.ceil(bestDistance / 5) + 4))
   try {
-    const goal = new goals.GoalNear(x, y, z, range)
-    const installed = setPathfinderGoal(bot, acq, goal)
-    if (!installed.ok) return { ok: false, reason: installed.reason }
-    const r = await waitForGoal(bot, ctx, timeoutMs)
-    if (r.kind === 'preempted') return { preempted: true, reason: 'reactive 抢占路径' }
-    if (r.kind === 'reached') return { ok: true }
-    if (r.kind === 'noPath' || r.kind === 'timeout') return { ok: false, reason: '寻路失败: ' + r.kind }
-    return { ok: false, reason: '寻路未完成: ' + r.kind }
+    for (let attempt = 0; attempt < maxSegments && Date.now() < deadline; attempt++) {
+      const remaining = Math.max(500, deadline - Date.now())
+      const waypoint = localWaypoint3D(bot, x, y, z, 6)
+      const goalRange = waypoint.final ? range + Math.min(1, attempt * 0.15) : 1.5
+      const goal = new goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, goalRange)
+      const installed = setPathfinderGoal(bot, acq, goal)
+      if (!installed.ok) return { ok: false, reason: installed.reason }
+      const r = await waitForGoal(bot, ctx, Math.min(7000, remaining))
+      if (r.kind === 'preempted') return { preempted: true, reason: 'reactive \u62a2\u5360\u8def\u5f84' }
+      const currentDistance = spatialDistanceTo(bot, x, y, z)
+      if (currentDistance <= range + 0.9) return { ok: true }
+      const progress = bestDistance - currentDistance
+      bestDistance = Math.min(bestDistance, currentDistance)
+      lastReason = '\u5bfb\u8def\u5931\u8d25: ' + r.kind
+      if (progress >= 0.35 && Date.now() + 500 < deadline) {
+        stagnantRetries = 0
+        continue
+      }
+      if ((r.kind === 'reached' || r.retryable) && ++stagnantRetries <= 1 && Date.now() + 500 < deadline) continue
+      return { ok: false, reason: lastReason }
+    }
+    return bestDistance <= range + 0.9 ? { ok: true } : { ok: false, reason: lastReason }
   } finally {
+    if (bot.pathfinder.movements) bot.pathfinder.movements.canDig = false
     acq.release()
   }
 }
@@ -1483,6 +1952,49 @@ function formatInventoryText (bot) {
   const weaponText = info.weapon && info.weapon.name ? '\u6b66\u5668 ' + info.weapon.name : '\u6b66\u5668 \u65e0'
   const shieldText = info.shield ? '\u76fe\u724c \u6709' : '\u76fe\u724c \u65e0'
   return held + '\uff1b\u80cc\u5305\uff1a' + (lines || '\u7a7a') + '\uff1b' + armorText + '\uff1b' + weaponText + '\uff1b' + shieldText
+}
+
+function chooseReachableExploreTarget (bot, distance, preferredDirection = '') {
+  const p = bot.entity.position
+  const vectors = {
+    north: [0, -1],
+    south: [0, 1],
+    east: [1, 0],
+    west: [-1, 0]
+  }
+  const ordered = []
+  if (vectors[preferredDirection]) ordered.push(preferredDirection)
+  for (const name of ['north', 'south', 'east', 'west']) if (!ordered.includes(name)) ordered.push(name)
+  // Diagonals often provide a route around a cliff face that blocks all four
+  // straight target points.
+  const diagonals = [[1, -1], [-1, -1], [1, 1], [-1, 1]]
+  const candidates = ordered.map(name => ({ name, vector: vectors[name] }))
+    .concat(diagonals.map((vector, i) => ({ name: 'diagonal-' + i, vector })))
+  const movements = bot.pathfinder?.movements
+  let best = null
+  for (const candidate of candidates) {
+    const [rawX, rawZ] = candidate.vector
+    const length = Math.hypot(rawX, rawZ) || 1
+    const ux = rawX / length
+    const uz = rawZ / length
+    const localDistance = Math.min(6, distance)
+    const localX = p.x + ux * localDistance
+    const localZ = p.z + uz * localDistance
+    const result = probePathResult(bot, movements, new goals.GoalNearXZ(localX, localZ, 1.25), 80)
+    if (!result || !Array.isArray(result.path)) continue
+    const pathLength = result.path.length
+    if (result.status !== 'success' && pathLength < 2) continue
+    const score = (result.status === 'success' ? 1000 : 0) + pathLength - (candidate.name === preferredDirection ? 0 : 0.25)
+    if (!best || score > best.score) {
+      best = {
+        x: p.x + ux * distance,
+        z: p.z + uz * distance,
+        direction: candidate.name,
+        score
+      }
+    }
+  }
+  return best
 }
 
 const handlers = {
@@ -1538,24 +2050,22 @@ const handlers = {
   },
 
   explore: async (bot, args, ctx) => {
-    if (!bot.pathfinder) throw new Error('pathfinder \u672a\u52a0\u8f7d')
+    if (!bot.pathfinder) throw new Error('pathfinder ???')
     const distance = Math.max(3, Math.min(Number(args.distance ?? 8), 24))
     const dir = String(args.direction || '').toLowerCase()
-    let x
-    let z
-    if (dir === 'north') { x = bot.entity.position.x; z = bot.entity.position.z - distance }
-    else if (dir === 'south') { x = bot.entity.position.x; z = bot.entity.position.z + distance }
-    else if (dir === 'east') { x = bot.entity.position.x + distance; z = bot.entity.position.z }
-    else if (dir === 'west') { x = bot.entity.position.x - distance; z = bot.entity.position.z }
-    else {
-      const angle = Math.random() * Math.PI * 2
-      x = bot.entity.position.x + Math.sin(angle) * distance
-      z = bot.entity.position.z + Math.cos(angle) * distance
+    let lastReason = '??????????'
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const target = chooseReachableExploreTarget(bot, distance, attempt === 0 ? dir : '')
+      if (!target) {
+        lastReason = '?????????????'
+        break
+      }
+      const nav = await pathNearXZ(bot, ctx, target.x, target.z, 2, 16000)
+      if (nav && nav.preempted) return nav
+      if (nav && nav.ok) return '???? ' + Math.floor(target.x) + ',' + Math.floor(target.z)
+      lastReason = nav && nav.reason ? nav.reason : lastReason
     }
-    const nav = await pathNearXZ(bot, ctx, x, z, 2, 45000)
-    if (nav && nav.preempted) return nav
-    if (nav && !nav.ok) throw new Error(nav.reason || '\u65e0\u6cd5\u63a2\u7d22')
-    return '\u5df2\u63a2\u7d22\u81f3 ' + Math.floor(x) + ',' + Math.floor(z)
+    throw new Error(lastReason)
   },
 
   attack: async (bot, args) => {
@@ -1632,6 +2142,8 @@ const handlers = {
       let lastProgressAt = Date.now()
       let bestDistance = Infinity
       let stalledReplans = 0
+      let lastReplanAt = 0
+      let replanDelayMs = 700
       while (Date.now() - started < durationMs) {
         throwIfAborted(ctx)
         const current = findPlayer(bot, username)
@@ -1651,20 +2163,40 @@ const handlers = {
           lastPosition = bot.entity.position.clone()
         }
 
-        const idle = bot.pathfinderOwner ? bot.pathfinderOwner.isIdle() : true
-        const stalled = dist > distance + 2 && Date.now() - lastProgressAt >= 12000
-        if (lastTargetId !== target.id || (dist > distance + 1 && idle) || stalled) {
+          const owner = bot.pathfinderOwner
+        const ownerIdle = owner ? owner.isIdle() : true
+        const idleWhy = owner ? String(owner.lastIdleWhy || '') : ''
+        let pathMoving = false
+        try { pathMoving = !!bot.pathfinder.isMoving() } catch {}
+        // A timed-out A* search may still provide a partial route. Once that
+        // route has been walked, replan from the new position. If the server
+        // reports noPath, back off instead of resetting the same impossible
+        // goal every 400 ms and starving the API/event loop.
+        const now = Date.now()
+        const partialRouteExhausted = dist > distance + 1 && !pathMoving && now - lastProgressAt >= 2500
+        const stalled = dist > distance + 2 && now - lastProgressAt >= 12000
+        const noPathBackoff = ownerIdle && idleWhy.includes('noPath') && now - lastReplanAt < 2500
+        const timeoutBackoff = ownerIdle && idleWhy.includes('timeout') && now - lastReplanAt < 1200
+        const canReplan = now - lastReplanAt >= replanDelayMs
+        const needsReplan = lastTargetId !== target.id ||
+          (!noPathBackoff && !timeoutBackoff && canReplan && dist > distance + 1 && ownerIdle) ||
+          (canReplan && partialRouteExhausted) || stalled
+        if (needsReplan) {
           if (stalled) {
             stalledReplans++
-            bot.pathfinderOwner?.stop(acq.token)
-            lastProgressAt = Date.now()
+            owner?.stop(acq.token)
+            lastProgressAt = now
             lastPosition = bot.entity.position.clone()
             bestDistance = dist
+            replanDelayMs = Math.min(5000, Math.max(1200, replanDelayMs * 1.5))
+          } else {
+            replanDelayMs = 700
           }
           const goal = new goals.GoalFollow(target, distance)
           const installed = setPathfinderGoal(bot, acq, goal, { dynamic: true })
-          if (!installed.ok) throw new Error(installed.reason || '无法设置跟随目标')
+          if (!installed.ok) throw new Error(installed.reason || '????????')
           lastTargetId = target.id
+          lastReplanAt = now
         }
         if (stalledReplans >= 4) throw new Error(`跟随被地形卡住，和 ${username} 相距 ${dist.toFixed(1)} 格，稍后自动重试`)
         await sleep(400, ctx)
@@ -1718,8 +2250,24 @@ const handlers = {
       }
     } else {
       const name = String(args.name || '').toLowerCase()
-      block = name ? findNearestBlock(bot, { ...args, name }) : findNearestBlockBy(bot, isCollectibleLike, radius, 128)
-      if (!block) itemDrop = nearestItemDrop(bot, radius)
+      if (name) {
+        block = await findReachableBlockBy(bot, candidate => {
+          if (!candidate || !candidate.name) return false
+          const blockName = String(candidate.name).toLowerCase()
+          const displayName = String(candidate.displayName || '').toLowerCase()
+          return blockName === name || displayName === name
+        }, radius, 128, 10)
+        if (!block) itemDrop = nearestItemDrop(bot, radius)
+      } else {
+        // Finish collecting existing drops before breaking another block. This
+        // prevents autonomous mode from leaving a trail of ore items behind.
+        itemDrop = nearestItemDrop(bot, radius)
+        if (!itemDrop) {
+          // A nearby block can still be behind a cliff or in an unreachable
+          // pocket. Check a small set of path candidates before committing to it.
+          block = await findReachableBlockBy(bot, candidate => isCollectibleLike(candidate) && canHarvestBlock(bot, candidate), radius, 128, 10)
+        }
+      }
     }
 
     if (!block && !itemDrop) {
@@ -1740,29 +2288,47 @@ const handlers = {
     }
 
     if (block) {
+      // Check the tool before walking to an ore. This prevents a long pathing
+      // attempt followed by destroying valuable ore with an invalid tool.
+      await equipForHarvest(bot, block)
+      const beforeYield = trackedYieldCount(bot, block.name)
       const dist = bot.entity.position.distanceTo(block.position)
       if (dist > 3.5) {
-        const nav = await pathNearXZ(bot, ctx, block.position.x, block.position.z, 2.5, 45000)
+        const nav = await pathNear(bot, ctx, block.position.x, block.position.y, block.position.z, 2.5, 15000)
         if (nav && nav.preempted) return nav
         if (nav && !nav.ok) throw new Error(nav.reason || '无法到达目标方块')
       }
       if (!blockVisible(bot, block)) {
-        try { await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true) } catch {}
-        await sleep(150, ctx)
-        if (!blockVisible(bot, block)) throw new Error('目标方块不可见，无法采集')
+        const exposed = await exposeBlockSafely(bot, block, ctx, 16)
+        if (!exposed) {
+          try { await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true) } catch {}
+          await sleep(150, ctx)
+          if (!blockVisible(bot, block)) throw new Error('\u76ee\u6807\u65b9\u5757\u4e0d\u53ef\u89c1\uff0c\u5df2\u5c1d\u8bd5\u6316\u5f00\u906e\u6321\u4f46\u4ecd\u65e0\u6cd5\u91c7\u96c6')
+        }
       }
-      try { await combat.equipBestToolForBlock(bot, block.name) } catch {}
       await raceWithAbort(bot.dig(block, true), ctx, () => {
         if (typeof bot.stopDigging === 'function') bot.stopDigging()
       })
-      const picked = await pickupNearbyDrops(bot, ctx, radius)
+      let picked = await pickupNearbyDrops(bot, ctx, radius)
       if (picked && picked.preempted) return picked
+      if (beforeYield != null) {
+        let gained = await waitForTrackedYield(bot, block.name, beforeYield, ctx, 1200)
+        if (gained <= 0) {
+          picked = await pickupNearbyDrops(bot, ctx, Math.min(24, radius + 4))
+          if (picked && picked.preempted) return picked
+          gained = await waitForTrackedYield(bot, block.name, beforeYield, ctx, 2500)
+        }
+        if (gained <= 0) throw new Error('\u5df2\u6316\u6398 ' + block.name + '\uff0c\u4f46\u6ca1\u6709\u62fe\u53d6\u5230\u5bf9\u5e94\u6389\u843d\u7269')
+        return '\u91c7\u96c6 ' + block.name + '\uff0c\u5df2\u62fe\u53d6 ' + gained + ' \u4e2a\u76ee\u6807\u6389\u843d\u7269'
+      }
       return '采集 ' + block.name + '，并已拾取附近掉落物'
     }
 
     const picked = await pickupNearbyDrops(bot, ctx, radius)
     if (picked && picked.preempted) return picked
-    return '已拾取附近掉落物'
+    if (picked && picked.collected > 0) return `已拾取附近掉落物 ${picked.collected} 个`
+    if (picked && picked.skipped > 0) return `附近有 ${picked.skipped} 个掉落物暂时不可达，已跳过并进入冷却`
+    return '附近没有需要拾取的可达掉落物'
   },
 
   chopTree: async (bot, args, ctx) => {
@@ -2055,23 +2621,18 @@ const handlers = {
   },
 
   craftGear: async (bot, args, ctx) => {
-    // Gear is only useful if the bot actually has wood in hand. Pick up any
-    // drops first, then gather/craft planks and place a workbench before the
-    // crafting loop so wooden tools do not silently fail on a fresh start.
     const picked = await pickupNearbyDrops(bot, ctx, 8)
     if (picked && picked.preempted) return picked
 
-    if (countMaterialFamily(bot, '_planks') < 4 && !findLogItem(bot, null)) {
-      const planks = await gatherAndCraftPlanks(bot, null, ctx, 12)
-      if (planks && planks.preempted) return planks
-    }
-    if (countMaterialFamily(bot, '_planks') < 4) {
-      const planks = await gatherAndCraftPlanks(bot, null, ctx, 12)
+    const missingBefore = GEAR_PRIORITY.filter(itemName => !findInventoryItemByName(bot, itemName))
+    if (missingBefore.length && countMaterialFamily(bot, '_planks') < 20) {
+      const planks = await gatherAndCraftPlanks(bot, null, ctx, 20)
       if (planks && planks.preempted) return planks
     }
     if (!findCraftingTableBlock(bot, 8)) await ensureCraftingTable(bot, ctx)
 
     const made = []
+    const failures = []
     for (const itemName of GEAR_PRIORITY) {
       throwIfAborted(ctx)
       if (findInventoryItemByName(bot, itemName)) continue
@@ -2079,7 +2640,9 @@ const handlers = {
         const r = await craftOneItem(bot, itemName, ctx, 1)
         if (r && r.preempted) return r
         if (typeof r === 'string') made.push(itemName)
-      } catch {}
+      } catch (err) {
+        failures.push(itemName + ': ' + String(err && err.message ? err.message : err))
+      }
     }
     for (const itemName of LEATHER_ARMOR_ITEMS) {
       throwIfAborted(ctx)
@@ -2090,12 +2653,19 @@ const handlers = {
         if (typeof r === 'string') made.push(itemName)
       } catch {}
     }
+
+    const missing = GEAR_PRIORITY.filter(itemName => !findInventoryItemByName(bot, itemName))
+    if (missing.length) {
+      const detail = failures.length ? ('\uff1b' + failures.slice(0, 4).join('\uff1b')) : ''
+      throw new Error('\u88c5\u5907\u5236\u4f5c\u672a\u5b8c\u6210\uff0c\u7f3a\u5c11: ' + missing.join(', ') + detail)
+    }
+
     let equipped = []
     try { equipped = await combat.equipBestArmor(bot) } catch {}
     try { await combat.equipBestMelee(bot) } catch {}
     try { await combat.equipShield(bot) } catch {}
-    const summary = made.length ? ('已制作: ' + made.join(', ')) : '装备已就绪，无需再制作'
-    const eq = equipped.length ? ('；自动装备: ' + equipped.join(', ')) : ''
+    const summary = made.length ? ('\u5df2\u5236\u4f5c: ' + made.join(', ')) : '\u88c5\u5907\u5df2\u5c31\u7eea\uff0c\u65e0\u9700\u518d\u5236\u4f5c'
+    const eq = equipped.length ? ('\uff1b\u81ea\u52a8\u88c5\u5907: ' + equipped.join(', ')) : ''
     return summary + eq
   },
 
@@ -2179,4 +2749,9 @@ async function execute (bot, action) {
   return r.reason || r.result || 'done'
 }
 
-module.exports = { execute, executeStructured, handlers }
+module.exports = {
+  execute,
+  executeStructured,
+  handlers,
+  _test: { nearestItemDrop, dropPickupCoolingDown, markDropPickupFailure, clearDropPickupFailure }
+}

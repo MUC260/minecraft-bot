@@ -1,4 +1,4 @@
-﻿const { Vec3 } = require('vec3')
+const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const combat = require('../lib/combat')
 
@@ -66,28 +66,52 @@ function nearestHostile (bot, radius) {
   best.threats = threats
   return best
 }
-function findNearestDryLand (bot, radius = 6) {
+function dryStandCell (bot, x, y, z) {
+  const feet = bot.blockAt(new Vec3(x, y, z))
+  const head = bot.blockAt(new Vec3(x, y + 1, z))
+  const ground = bot.blockAt(new Vec3(x, y - 1, z))
+  if (!feet || !head || !ground) return false
+  if (WATER_BLOCKS.has(feet.name) || WATER_BLOCKS.has(head.name) || WATER_BLOCKS.has(ground.name)) return false
+  return feet.boundingBox === 'empty' && head.boundingBox === 'empty' && !!ground.boundingBox && ground.boundingBox !== 'empty'
+}
+
+function dryContinuationCount (bot, x, y, z) {
+  let count = 0
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    if (dryStandCell(bot, x + dx, y, z + dz) ||
+        dryStandCell(bot, x + dx, y + 1, z + dz) ||
+        dryStandCell(bot, x + dx, y - 1, z + dz)) count++
+  }
+  return count
+}
+
+function findNearestDryLand (bot, radius = 14) {
   if (!bot.entity) return null
   const p = bot.entity.position
-  for (let r = 0; r <= radius; r++) {
+  const baseY = Math.floor(p.y)
+  let best = null
+  for (let r = 1; r <= radius; r++) {
     for (let dx = -r; dx <= r; dx++) {
       for (let dz = -r; dz <= r; dz++) {
         if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
         const x = Math.floor(p.x) + dx
-        const y = Math.floor(p.y)
         const z = Math.floor(p.z) + dz
-        const feet = bot.blockAt(new Vec3(x, y, z))
-        const head = bot.blockAt(new Vec3(x, y + 1, z))
-        const ground = bot.blockAt(new Vec3(x, y - 1, z))
-        if (!feet || !head || !ground) continue
-        if (WATER_BLOCKS.has(feet.name) || WATER_BLOCKS.has(head.name) || WATER_BLOCKS.has(ground.name)) continue
-        if (!head.boundingBox || head.boundingBox !== 'empty') continue
-        if (!ground.boundingBox || ground.boundingBox === 'empty') continue
-        return { x, y, z }
+        // Banks and cliff shelves can be several blocks above a swimmer.
+        for (let dy = 7; dy >= -3; dy--) {
+          const y = baseY + dy
+          if (!dryStandCell(bot, x, y, z)) continue
+          const continuation = dryContinuationCount(bot, x, y, z)
+          // Reject isolated dirt/sand pillars: reaching one technically exits
+          // water but leaves every ordinary navigation goal at noPath.
+          if (continuation < 1) continue
+          const score = r + Math.abs(dy) * 1.35 - Math.min(continuation, 3) * 0.4
+          if (!best || score < best.score) best = { x, y, z, score }
+        }
       }
     }
+    if (best && best.score <= r + 2) break
   }
-  return null
+  return best ? { x: best.x, y: best.y, z: best.z } : null
 }
 
 class ReactiveController {
@@ -112,6 +136,10 @@ class ReactiveController {
     this._lastCloseFleeRepathAt = 0
     this._lastHazardLogAt = 0
     this._lastWaterLogAt = 0
+    this._waterEscapeTargetKey = ''
+    this._waterEscapeTarget = null
+    this._waterLandScanAt = 0
+    this._lastWaterGoalAt = 0
     this._autoEatBusy = false
     this._autoEatAt = 0
     this._autoGearBusy = false
@@ -198,7 +226,13 @@ class ReactiveController {
     this.transitionHistory.push(t)
     if (this.transitionHistory.length > 100) this.transitionHistory.shift()
     this.bot.emit('reactive:state', t)
-    if (next === STATE.NORMAL) this._releaseToken()
+    if (next === STATE.NORMAL) {
+      this._waterEscapeTargetKey = ''
+      this._waterEscapeTarget = null
+      this._waterLandScanAt = 0
+      this._lastWaterGoalAt = 0
+      this._releaseToken()
+    }
   }
 
   _tick () {
@@ -369,19 +403,48 @@ class ReactiveController {
     }
   }
   _applyWaterEscape (now) {
-    const land = findNearestDryLand(this.bot, 6)
+    if (!this._waterEscapeTarget || now - this._waterLandScanAt >= 800) {
+      this._waterEscapeTarget = findNearestDryLand(this.bot, 14)
+      this._waterLandScanAt = now
+    }
+    const land = this._waterEscapeTarget
+    let pathMoving = false
+    try { pathMoving = !!this.bot.pathfinder?.isMoving?.() } catch {}
+    const ownerIdle = this.pathfinderOwner?.isIdle?.() !== false
+
     if (land && this.pathfinderOwner && this.movements) {
       const token = this._ensureToken('WATER_ESCAPE')
       if (token) {
-        const goal = new goals.GoalNear(land.x, land.y, land.z, 1)
-        this.pathfinderOwner.setGoal(token.token, goal, { movements: this.movements })
+        const key = `${land.x},${land.y},${land.z}`
+        const targetChanged = key !== this._waterEscapeTargetKey
+        const retryIdleGoal = ownerIdle && now - this._lastWaterGoalAt >= 1500
+        if (targetChanged || retryIdleGoal) {
+          // GoalNear(..., 1) considered an adjacent water block "reached", so
+          // the bot stayed in water forever. GoalBlock requires actually
+          // entering the dry cell. Do not reset it every physics tick: that
+          // discards partial mountain/shore paths before they can be walked.
+          const goal = new goals.GoalBlock(land.x, land.y, land.z)
+          this.pathfinderOwner.setGoal(token.token, goal, { movements: this.movements })
+          this._waterEscapeTargetKey = key
+          this._lastWaterGoalAt = now
+        }
       }
-    }
-    if (!land) {
-      this.bot.setControlState('jump', true)
     } else {
-      this.bot.setControlState('jump', false)
+      this._waterEscapeTargetKey = ''
     }
+
+    // Keep afloat if there is no active path. If A* cannot enter the shore
+    // cell, swim directly toward it instead of repeatedly calculating the same
+    // empty route. This is deliberately limited to the emergency water state.
+    const lastIdleWhy = String(this.pathfinderOwner?.lastIdleWhy || '')
+    const directSwim = !!land && ownerIdle && lastIdleWhy.includes('noPath')
+    if (directSwim) {
+      try { this.bot.lookAt(new Vec3(land.x + 0.5, land.y + 0.6, land.z + 0.5), true) } catch {}
+      this.bot.setControlState('forward', true)
+    } else if (!pathMoving) {
+      this.bot.setControlState('forward', false)
+    }
+    this.bot.setControlState('jump', !land || (!pathMoving && ownerIdle))
     if (now - this._lastWaterLogAt > 2000) {
       this.bot.emit('reactive:log', { level: 'warn', message: 'water escape active' })
       this._lastWaterLogAt = now
@@ -719,6 +782,7 @@ class ReactiveController {
       fleeingFrom: this._fleeingFrom ? this._fleeingFrom.name : null,
       engaging: this._engaging ? this._engaging.name : null,
       escapeTarget: this._lastEscapeTarget?.target || null,
+      waterEscapeTarget: this._waterEscapeTarget || null,
       combat: {
         armor: combat.armorSummary(this.bot),
         weapon: combat.heldWeaponSummary(this.bot),

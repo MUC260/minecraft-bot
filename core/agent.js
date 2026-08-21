@@ -123,7 +123,22 @@ class BotAgent extends EventEmitter {
       if (bot.version) this._lastKnownVersion = String(bot.version)
       try {
         const mcData = require('minecraft-data')(bot.version)
+        // Bound path search work after the plugin has been injected. Unlimited
+        // searches can monopolize the event loop on cliffs and cave systems.
+        bot.pathfinder.thinkTimeout = Math.max(250, Math.min(1500, Number(this.config.pathfinder?.thinkTimeoutMs ?? 350)))
+        bot.pathfinder.tickTimeout = Math.max(3, Math.min(10, Number(this.config.pathfinder?.tickTimeoutMs ?? 3)))
+        bot.pathfinder.searchRadius = Math.max(8, Math.min(64, Number(this.config.pathfinder?.searchRadius ?? 12)))
         this.movements = new Movements(bot, mcData)
+        // Entity collision indexing and parkour make dense servers/mountains
+        // much more expensive and are common causes of API stalls.
+        this.movements.allowEntityDetection = false
+        this.movements.allowParkour = false
+        // Digging and 1x1 tower placement multiply A* branches on mountains and
+        // can grow one route search to hundreds of MB. Resource skills already
+        // dig/place explicitly, so ordinary navigation should stay walk-only.
+        this.movements.canDig = false
+        this.movements.allow1by1towers = false
+        this.movements.maxDropDown = 3
         bot.pathfinder.setMovements(this.movements)
         this.reactive.setMovements(this.movements)
       } catch (e) {
@@ -262,6 +277,7 @@ class BotAgent extends EventEmitter {
       reconnectAttempts: this._reconnectAttempts,
       bot: snap.bot,
       reactive: this.reactive ? this.reactive.status() : null,
+      pathfinder: this.pathfinderOwner ? this.pathfinderOwner.status() : null,
       executorBusy: this.executor ? this.executor.busy : false
     }
   }

@@ -73,5 +73,10 @@
     "executor": {
         "skillTimeoutMs": 120000,
         "resumeGateTimeoutMs": 30000
+    },
+    "pathfinder": {
+        "thinkTimeoutMs": 350,
+        "tickTimeoutMs": 3,
+        "searchRadius": 12
     }
 }

@@ -186,3 +186,27 @@ npm run build:gui
 ```text
 D:\minecraft-bot\dist\minecraft-bot-gui.exe
 ```
+
+## 2026-08-17 寻路核心修复（待提交）
+
+用户确认主要故障集中在寻路失败。本轮实服定位到根因：`mineflayer-pathfinder` 的 A* `timeout` 结果经常仍携带可用的部分路径，但旧逻辑立即把 timeout 当作空路径失败并释放寻路令牌；`follow` 同时把该状态判定为空闲，每 400ms 重设目标，导致部分路径还没走就被清除，并持续占用事件循环。
+
+修复内容：
+- `core/pathfinderOwner.js`：只有 `noPath/timeout` 且返回路径为空时才标记寻路空闲；保留 timeout 中的有效部分路径。
+- `core/actions.js`：
+  - `waitForGoal` 会让机器人先走完 A* 返回的部分路径。
+  - 部分路径走完后从新位置自动重新规划，最多分段推进 4 次。
+  - `pathNear` / `pathNearXZ` 根据实际坐标进展判断成功或继续，不再见到 timeout 就立即停止。
+  - `follow` 检测部分路径是否已走完，间隔 2.5 秒重新规划，避免 400ms 高频重置。
+- `core/agent.js`：降低单次寻路 CPU 占用；关闭实体碰撞索引和跑酷寻路，减少复杂山地/实体密集服务器上的 API 卡顿。
+- 安全寻路默认值：`thinkTimeoutMs=700`、`tickTimeoutMs=6`、`searchRadius=24`。
+- 本地 `config.json` 已同步以上参数；该文件仍不提交。
+- `scripts/smoke.js` 增加 timeout 携带部分路径时不得立即丢弃的回归测试。
+
+实服验证：
+- `follow MUC260`：机器人从约 `313.6,88,-61.8` 连续爬升并移动到约 `313.5,103,-90.4`，12 秒动作正常完成。
+- 寻路期间控制 API 连续响应约 34–90ms，没有再次出现面板卡死。
+- `chopTree radius=16 max=8`：复杂山地中成功接近云杉并获得 3 个云杉原木，动作正常完成。
+- `npm run check`、`npm test`、`git diff --check` 均通过。
+- 已重新构建 `dist/minecraft-bot.exe` 与 `dist/minecraft-bot-gui.exe`。
+- 当前机器人在线，自主循环暂停，动作队列空闲。
