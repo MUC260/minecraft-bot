@@ -117,13 +117,12 @@ class SkillExecutor extends EventEmitter {
         continue
       }
 
-      this.queue.shift()
+      if (this.queue[0] === call) this.queue.shift()
       this.currentCall = null
       this.emit('skill:result', { call, result })
       if (!result.ok) {
         this.emit('queue:failure', { call, result })
-        this.queue.length = 0
-        break
+        continue
       }
     }
 
@@ -179,7 +178,7 @@ class SkillExecutor extends EventEmitter {
         continue
       }
       const releasedAt = Number(owner.lastReleasedAt) || 0
-      if (!this.paused && owner.isIdle() && releasedAt > 0 && Date.now() - releasedAt >= debounce) return true
+      if (!this.paused && owner.isIdle() && (releasedAt === 0 || Date.now() - releasedAt >= debounce)) return true
       if (Date.now() - start > gate) return false
       await new Promise(resolve => setTimeout(resolve, 50))
     }

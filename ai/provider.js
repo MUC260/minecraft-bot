@@ -1,4 +1,6 @@
-﻿// 单次请求（带超时）
+const { TOOL_NAMES } = require('./tools')
+
+// 单次请求（带超时）
 async function chatCompletionOnce ({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens }) {
   const url = String(baseUrl).replace(/\/+$/, '') + '/chat/completions'
   const body = { model, messages, temperature, max_tokens: maxTokens }
@@ -6,19 +8,13 @@ async function chatCompletionOnce ({ baseUrl, apiKey, model, messages, tools, te
   const headers = { 'Content-Type': 'application/json' }
   if (apiKey) headers.Authorization = 'Bearer ' + apiKey
 
-  // 请求超时（防止 AI API 响应慢导致 tick 卡死）
   const controller = new AbortController()
   const timeoutMs = 90000
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
   let res
   try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal
-    })
+    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal })
   } catch (e) {
     clearTimeout(timer)
     throw new Error('AI API 请求超时或失败: ' + e.message)
@@ -38,7 +34,6 @@ function serialize (fn) {
   return run
 }
 
-// 主 API + 备用降级：主失败（网络/5xx/429）时自动重试，再尝试备用
 async function chatCompletion (opts) {
   return serialize(async () => {
     let lastErr
@@ -69,48 +64,116 @@ async function chatCompletion (opts) {
   })
 }
 
-// 从文本中提取所有 JSON 数组元素（兼容 markdown 代码块、多数组、纯文本混排）
-function extractActions (text) {
-  if (!text) return []
-  let t = String(text).trim()
-  // 去掉 markdown 代码块包裹
+async function listModels ({ baseUrl, apiKey }) {
+  const url = String(baseUrl).replace(/\/+$/, '') + '/models'
+  const headers = {}
+  if (apiKey) headers.Authorization = 'Bearer ' + apiKey
+  const res = await fetch(url, { headers })
+  const text = await res.text()
+  if (!res.ok) throw new Error('API ' + res.status + ': ' + text.slice(0, 300))
+  const data = JSON.parse(text)
+  const list = data.data || data.models || data
+  return Array.isArray(list) ? list.map(m => m.id || m.name || m.model).filter(Boolean) : []
+}
+
+function effectiveContent (message) {
+  if (message && typeof message.content === 'string' && message.content.trim()) return message.content
+  if (message && typeof message.reasoning_content === 'string' && message.reasoning_content.trim()) return message.reasoning_content
+  if (message && typeof message.reasoning === 'string' && message.reasoning.trim()) return message.reasoning
+  return ''
+}
+
+function stripFence (text) {
+  let t = String(text || '').trim()
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/)
   if (fence) t = fence[1].trim()
+  return t
+}
 
-  const actions = []
-  // 用正则匹配所有独立的 JSON 数组 [ ... ]（非贪婪，允许嵌套对象）
-  const arrayRe = /\[[\s\S]*?\]/g
-  let m
-  while ((m = arrayRe.exec(t)) !== null) {
-    try {
-      const arr = JSON.parse(m[0])
-      if (Array.isArray(arr)) {
-        for (const item of arr) {
-          if (item && typeof item === 'object') {
-            if (item.name) actions.push({ type: 'tool', name: item.name, args: item.args || {} })
-            else if (item.message) actions.push({ type: 'chat', message: item.message })
-          }
+function findBalanced (text, open, close) {
+  const out = []
+  const n = text.length
+  let i = 0
+  while (i < n) {
+    if (text[i] !== open) { i++; continue }
+    let depth = 0
+    let inString = false
+    let esc = false
+    let j = i
+    for (; j < n; j++) {
+      const ch = text[j]
+      if (inString) {
+        if (esc) { esc = false }
+        else if (ch === '\\') { esc = true }
+        else if (ch === '"') { inString = false }
+        continue
+      }
+      if (ch === '"') { inString = true; continue }
+      if (ch === open) { depth++ }
+      else if (ch === close) {
+        depth--
+        if (depth === 0) {
+          out.push(text.slice(i, j + 1))
+          i = j + 1
+          break
         }
       }
-    } catch (e) { /* 忽略单个数组解析失败 */ }
+    }
+    if (j === n) { i = n }
+  }
+  return out
+}
+
+function pushTool (arr, obj) {
+  if (!obj || typeof obj !== 'object') return
+  if (obj.name) arr.push({ type: 'tool', name: obj.name, args: obj.args || {} })
+  else if (obj.message) arr.push({ type: 'chat', message: obj.message })
+}
+
+function extractActions (text) {
+  const t = stripFence(text)
+  const actions = []
+  for (const chunk of findBalanced(t, '[', ']')) {
+    try {
+      const arr = JSON.parse(chunk)
+      if (Array.isArray(arr)) {
+        for (const item of arr) pushTool(actions, item)
+      }
+    } catch (e) { /* ignore */ }
   }
   return actions
 }
 
-// 从文本中提取单个 JSON 对象 {name, args}（兼容多对象）
 function extractSingleObjects (text) {
-  if (!text) return []
+  const t = stripFence(text)
   const actions = []
-  const objRe = /\{[\s\S]*?\}/g
-  let m
-  while ((m = objRe.exec(text)) !== null) {
+  for (const chunk of findBalanced(t, '{', '}')) {
     try {
-      const obj = JSON.parse(m[0])
-      if (obj && obj.name) actions.push({ type: 'tool', name: obj.name, args: obj.args || {} })
-      else if (obj && obj.message) actions.push({ type: 'chat', message: obj.message })
-    } catch (e) {}
+      const obj = JSON.parse(chunk)
+      pushTool(actions, obj)
+    } catch (e) { /* ignore */ }
   }
   return actions
+}
+
+function extractNamedObjects (text) {
+  const t = stripFence(text)
+  const out = []
+  const re = /([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\{/g
+  let m
+  while ((m = re.exec(t)) !== null) {
+    const name = m[1]
+    if (!TOOL_NAMES.has(name)) continue
+    const start = m.index + m[0].length - 1
+    const chunks = findBalanced(t.slice(start), '{', '}')
+    if (!chunks.length) continue
+    try {
+      const args = JSON.parse(chunks[0])
+      out.push({ type: 'tool', name, args: args && typeof args === 'object' ? args : {} })
+      re.lastIndex = start + chunks[0].length
+    } catch (e) { /* ignore */ }
+  }
+  return out
 }
 
 function parseActions (data) {
@@ -118,7 +181,6 @@ function parseActions (data) {
   if (!message) return []
   const actions = []
 
-  // 1. 标准 function calling
   if (Array.isArray(message.tool_calls)) {
     for (const tc of message.tool_calls) {
       let args = {}
@@ -127,19 +189,33 @@ function parseActions (data) {
     }
   }
 
-  // 2. 文本内容解析（JSON 数组 / 对象 / 聊天）
-  const content = message.content
-  if (typeof content === 'string' && content.trim()) {
-    const fromArrays = extractActions(content)
-    if (fromArrays.length) {
-      actions.push(...fromArrays)
+  const content = effectiveContent(message)
+  if (content) {
+    const cleaned = stripFence(content)
+    let direct = null
+    try { direct = JSON.parse(cleaned) } catch (e) {}
+
+    if (direct && (Array.isArray(direct) || typeof direct === 'object')) {
+      const list = Array.isArray(direct)
+        ? direct
+        : (Array.isArray(direct.actions) ? direct.actions : [direct])
+      for (const item of list) pushTool(actions, item)
     } else {
-      const fromObjects = extractSingleObjects(content)
-      if (fromObjects.length) {
-        actions.push(...fromObjects)
-      } else if (content.trim().startsWith('{') === false) {
-        // 非 JSON 文本 → 视为聊天
-        actions.push({ type: 'chat', message: content.trim() })
+      const fromNamed = extractNamedObjects(content)
+      if (fromNamed.length) {
+        actions.push(...fromNamed)
+      } else {
+        const fromArrays = extractActions(content)
+        if (fromArrays.length) {
+          actions.push(...fromArrays)
+        } else {
+          const fromObjects = extractSingleObjects(content)
+          if (fromObjects.length) {
+            actions.push(...fromObjects)
+          } else {
+            actions.push({ type: 'chat', message: content.trim() })
+          }
+        }
       }
     }
   }
@@ -147,4 +223,4 @@ function parseActions (data) {
   return actions
 }
 
-module.exports = { chatCompletion, parseActions }
+module.exports = { chatCompletion, parseActions, listModels }

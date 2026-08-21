@@ -67,7 +67,7 @@ const ORE_ALIASES = {
   绿宝石: 'emerald_ore'
 }
 
-const ORE_NAME_RE = /(?:找|挖|开采|采集|去挖|去找)(?:一下|一些)?(?:(\d+|[零〇一二两三四五六七八九十百]+)(?:个|块|颗)?)?(?:的)?(钻石矿石|钻石|钻|铁矿石|铁矿|铁|煤矿石|煤矿|煤|金矿石|金矿|金子|黄金|金|青金石矿石|青金石|红石矿石|红石|铜矿石|铜矿|铜|绿宝石矿石|绿宝石)/
+const ORE_NAME_RE = /(?:挖掘|找|挖|开采|采集|去挖|去找)(?:一下|一些|点|些|几个)?(?:(\d+|[零〇一二两三四五六七八九十百]+)(?:个|块|颗)?)?(?:的)?(钻石矿石|钻石|钻|铁矿石|铁矿|铁|煤矿石|煤矿|煤|金矿石|金矿|金子|黄金|金|青金石矿石|青金石|红石矿石|红石|铜矿石|铜矿|铜|绿宝石矿石|绿宝石)/
 
 function chineseNumber (value) {
   const text = String(value || '').trim()
@@ -145,21 +145,22 @@ class ChatCommander {
   _matchMention (raw) {
     const text = String(raw || '').trim()
     if (!text || !text.startsWith('@')) return null
-    // 唤醒词 = @机器人名，支持自定义覆盖
-    // 匹配 "@AIBot 指令" 或 "@AIBot指令"
-    const mention = this.aiMention.toLowerCase()
-    const lowered = text.toLowerCase()
-    if (lowered === mention) return ''
-    if (lowered.startsWith(mention + ' ') || lowered.startsWith(mention + '\u00A0')) {
-      return text.slice(mention.length).trim()
-    }
-    // 自定义唤醒词（完整匹配）
-    if (this._customAiMention) {
-      const custom = this._customAiMention.toLowerCase()
-      if (lowered === custom) return ''
-      if (lowered.startsWith(custom + ' ') || lowered.startsWith(custom + '\u00A0')) {
-        return text.slice(this._customAiMention.length).trim()
+    const lower = text.toLowerCase()
+    const separators = [' ', '\u00A0', ':', '\uFF1A', ',', '\uFF0C']
+    const tryMention = (word) => {
+      const w = String(word || '').toLowerCase()
+      if (!w) return null
+      if (lower === w) return ''
+      for (const sep of separators) {
+        if (lower.startsWith(w + sep)) return text.slice(w.length + sep.length).trim()
       }
+      return null
+    }
+    const result = tryMention(this.aiMention)
+    if (result !== null) return result
+    if (this._customAiMention) {
+      const custom = tryMention(this._customAiMention)
+      if (custom !== null) return custom
     }
     return null
   }
@@ -183,15 +184,24 @@ class ChatCommander {
       return true
     }
     const now = Date.now()
-    const key = 'ai:' + String(username || '').toLowerCase()
+    const key = 'ai:' + String(username || '').toLowerCase() + '\u0000' + query.toLowerCase()
     const last = this._lastCommandAt.get(key) || 0
     if (now - last < 3000) return true
     this._lastCommandAt.set(key, now)
 
     item.handled = true
     logger.info(`@ai 指令 ${username}: ${query}`)
-    this._ack(`@${username} 收到指令，AI 正在处理…`)
 
+    // 先用本地确定性解析处理明确指令，避免依赖 LLM 返回间接计划或不可执行动作。
+    const local = this.parse(query, username, { allowGoalFallback: false })
+    if (local && local.action) {
+      this._ack(local.ack || `@${username} 收到，开始执行：${query}`)
+      if (this.brain && typeof this.brain.setGoal === 'function') this.brain.setGoal(local.goal)
+      this._dispatchAction(local.action)
+      return true
+    }
+
+    this._ack(`@${username} 收到指令，AI 正在处理…`)
     try {
       const result = await this.brain.ask(query, username)
       const reply = String(result && result.reply || '').trim()
@@ -463,7 +473,7 @@ class ChatCommander {
     const normalized = normalize(raw)
     if (!text) return null
 
-    if (/^(停止|停下|站住|别动|不要动|别乱动|站住别动|原地待命|待机|stop|done|complete|finish)/.test(text) || /^(完成|完成了|好了|可以了|结束|完毕)$/.test(text)) {
+    if (/^(停|停止|停下|站住|别动|不要动|别乱动|站住别动|原地待命|待机|stop|done|complete|finish)/.test(text) || /^(完成|完成了|好了|可以了|结束|完毕)$/.test(text)) {
       return {
         action: { name: 'stop', args: {} },
         goal: '停止当前动作，原地待命。'
@@ -507,7 +517,7 @@ class ChatCommander {
       }
     }
 
-    if (/^(停止|停下|站住|别动|不要动|别乱动|站住别动|原地待命|待机|stop|done|complete|finish)/.test(text) || /^(完成|完成了|好了|可以了|结束|完毕)$/.test(text)) {
+    if (/^(停|停止|停下|站住|别动|不要动|别乱动|站住别动|原地待命|待机|stop|done|complete|finish)/.test(text) || /^(完成|完成了|好了|可以了|结束|完毕)$/.test(text)) {
       return {
         action: { name: 'stop', args: {} },
         goal: '停止当前动作，原地待命。'
@@ -580,14 +590,14 @@ class ChatCommander {
       }
     }
 
-    if (/\u5236\u4f5c\u88c5\u5907|\u505a\u88c5\u5907|\u5408\u6210\u88c5\u5907|\u9020\u88c5\u5907|\u51c6\u5907\u88c5\u5907|\u7a7f\u88c5\u5907|\u51c6\u5907\u5de5\u5177|\u5236\u4f5c\u5de5\u5177|\u505a\u5de5\u5177|\u5408\u6210\u5de5\u5177|\u9020\u5de5\u5177|craftgear|craftarmor|gearup|crafttools/.test(text)) {
+    if (/\u5236\u4f5c\u88c5\u5907|\u505a\u88c5\u5907|\u5408\u6210\u88c5\u5907|\u9020\u88c5\u5907|\u5236\u9020\u88c5\u5907|\u51c6\u5907\u88c5\u5907|\u7a7f\u88c5\u5907|\u51c6\u5907\u5de5\u5177|\u5236\u4f5c\u5de5\u5177|\u505a\u5de5\u5177|\u5408\u6210\u5de5\u5177|\u9020\u5de5\u5177|\u5236\u9020\u5de5\u5177|craftgear|craftarmor|gearup|crafttools/.test(text)) {
       return {
         action: { name: 'craftGear', args: {} },
         goal: '\u5236\u4f5c\u57fa\u7840\u5de5\u5177\u3001\u6b66\u5668\u548c\u88c5\u5907\uff0c\u7136\u540e\u81ea\u52a8\u88c5\u5907\u3002'
       }
     }
 
-    const craftMatch = normalized.match(/^(?:\u5236\u4f5c|\u5408\u6210|\u6253\u9020|\u505a|\u9020)(.+)$/)
+    const craftMatch = normalized.match(/^(?:\u5236\u4f5c|\u5408\u6210|\u6253\u9020|\u505a|\u9020|\u5236\u9020)(.+)$/)
     if (craftMatch) {
       const targetRaw = String(craftMatch[1] || '').trim()
       return {

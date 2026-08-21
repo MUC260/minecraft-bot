@@ -46,6 +46,18 @@ class Brain {
     })
     this._restoreMemory()
 
+    // A fresh process start should not re-announce a stale completed/failed plan
+    // restored from disk; resume in free-play mode instead.
+    if (this.plan && (this.plan.status === 'complete' || this.plan.status === 'failed')) {
+      this.goal = '\u81ea\u7531\u884c\u52a8\uff1a\u89c2\u5bdf\u73af\u5883\uff0c\u5408\u7406\u4e92\u52a8\u3002'
+      this.plan = this._emptyPlan(this.goal)
+      this._completionReported = true
+      this._lastPlanKey = ''
+      this._repeatStreak = 0
+      this._forceVary = false
+      if (this.memory) this.memory.setGoal(this.goal, this.plan)
+    }
+
     this._onQueueEmpty = () => {
       this._recordBatchEnd()
       this._kick(150)
@@ -1027,7 +1039,8 @@ actions 数组可以为空（如果只需要回复）。动作名必须是可用
     const message = data && data.choices && data.choices[0] && data.choices[0].message
     if (!message) return null
 
-    const content = message.content
+    let content = message.content
+    if (typeof content !== 'string' || !content.trim()) content = message.reasoning_content || message.reasoning || ''
     if (typeof content === 'string' && content.trim()) {
       let text = content.trim()
       // strip a leading markdown code fence if present
@@ -1124,6 +1137,7 @@ actions 数组可以为空（如果只需要回复）。动作名必须是可用
   _normalizeActions (actions) {
     const out = []
     for (const action of actions) {
+      if (!action || typeof action !== 'object') continue
       if (action.type === 'chat' && action.message) {
         out.push({ name: 'chat', args: { message: action.message } })
         continue

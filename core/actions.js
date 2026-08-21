@@ -629,7 +629,7 @@ async function craftWithRetry (bot, recipe, count, table, ctx) {
   let lastErr = null
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      await bot.craft(recipe, count, table)
+      await raceWithAbort(bot.craft(recipe, count, table), ctx, () => closeOpenWindow(bot))
       closeOpenWindow(bot)
       return true
     } catch (err) {
@@ -725,7 +725,12 @@ function toolPlanksNeeded (itemName) {
 }
 
 function resolveCraftItemName (bot, raw) {
-  const target = String(raw || '').trim().toLowerCase()
+  let target = String(raw || '').trim().toLowerCase()
+  if (!target) return null
+  // Strip leading Chinese quantity words and trailing modal particles.
+  target = target.replace(/^(?:一把|一个|一只|一件|一套|一些|几个|一|把|只|件|套)/, '')
+  target = target.replace(/(?:给我|吧|啊|呀|哦|噢|一个|好吗)+$/, '')
+  target = target.trim()
   if (!target) return null
   if (CRAFT_ALIASES[target]) return CRAFT_ALIASES[target]
   const byName = getItemsByName(bot)
@@ -1073,7 +1078,7 @@ async function digReachableTree (bot, start, ctx, limit = 48) {
     if (distance > 4.5 && dug === 0) {
       const nav = await pathNear(bot, ctx, block.position.x, block.position.y, block.position.z, 2.5, 20000)
       if (nav && nav.preempted) return { preempted: true, reason: nav.reason }
-      if (nav && !nav.ok) throw new Error(nav.reason || '\u65e0\u6cd5\u5230\u8fbe\u6811\u6728')
+      if (nav && !nav.ok) { const e = new Error(nav.reason || '\u65e0\u6cd5\u5230\u8fbe\u6811\u6728'); e.code = 'NO_TREE'; throw e }
       distance = bot.entity.position.distanceTo(block.position)
     }
     // Tall trunks can extend beyond normal digging reach. Finish every log that
@@ -1129,7 +1134,7 @@ async function chopOneTree (bot, ctx, maxBlocks = 48, radius = 16) {
   } catch {}
   const result = await digReachableTree(bot, block.position, ctx, maxBlocks)
   if (result.preempted) return result
-  if (!result.dug) throw new Error('\u627e\u5230\u4e86\u6811\u6728\uff0c\u4f46\u5f53\u524d\u89d2\u5ea6\u6216\u5730\u5f62\u4e0b\u65e0\u6cd5\u6316\u5230\u539f\u6728')
+  if (!result.dug) { const e = new Error('\u627e\u5230\u4e86\u6811\u6728\uff0c\u4f46\u5f53\u524d\u89d2\u5ea6\u6216\u5730\u5f62\u4e0b\u65e0\u6cd5\u6316\u5230\u539f\u6728'); e.code = 'NO_TREE'; throw e }
   const picked = await pickupNearbyDrops(bot, ctx)
   if (picked && picked.preempted) return picked
   return result
@@ -2477,7 +2482,6 @@ const handlers = {
       if (!result.dug) break
       const picked = await pickupNearbyDrops(bot, ctx, radius)
       if (picked && picked.preempted) return picked
-      if (!targetCount) break
     }
 
     const collected = targetCount && name ? Math.max(0, oreYieldCount(bot, name) - beforeYield) : totalDug
@@ -2486,7 +2490,7 @@ const handlers = {
       throw new Error(`附近 ${radius} 格内没有可见的 ${label}，请先带我到矿洞或矿脉附近`)
     }
     if (targetCount && collected < targetCount) {
-      throw new Error(`已挖 ${totalDug} 块并拾取 ${collected}/${targetCount} 个目标矿物，附近暂时找不到更多`)
+      return `部分完成：已挖 ${totalDug} 块并拾取 ${collected}/${targetCount} 个目标矿物，附近暂时找不到更多`
     }
     if (targetCount) return `采矿完成：已挖 ${totalDug} 块并拾取 ${collected}/${targetCount} 个目标矿物`
     return `采矿完成：共挖掘 ${totalDug} 块，并已拾取附近掉落物`
@@ -2632,7 +2636,10 @@ const handlers = {
 
     const result = await placeMany(bot, positions, ctx, selected)
     if (result && result.preempted) return result
-    if (!result.placed) throw new Error('房子还没开始建，可能被挡住了。')
+    const uniquePositions = new Set(positions.map(p => p.x + ',' + p.y + ',' + p.z)).size
+    if (!result.placed || (uniquePositions > 0 && result.placed / uniquePositions < 0.5)) {
+      throw new Error('房子建造不完整，实际放置 ' + result.placed + '/' + uniquePositions + ' 个方块，已中止以免误报完成')
+    }
 
     const furnished = await furnishHouse(bot, houseArgs, ctx)
     if (furnished && furnished.preempted) return furnished
