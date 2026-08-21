@@ -9,6 +9,7 @@ const MAX_HISTORY_MESSAGES = 24
 const MAX_HISTORY_CHARS = 16000
 const SURVIVAL_COOLDOWN_MS = 4000
 const TERMINAL_BUILD_STEPS = new Set(['buildHouse', 'buildTower', 'buildBridge', 'buildWall', 'buildShelter'])
+const MINE_DROP_NAMES = { stone: 'cobblestone', deepslate: 'cobbled_deepslate', grass_block: 'dirt', dirt: 'dirt', gravel: 'gravel', sand: 'sand', obsidian: 'obsidian', flint: 'flint' }
 
 class Brain {
   constructor (agent, config) {
@@ -413,6 +414,14 @@ class Brain {
     if (name === 'follow') return 86400000
     if (name === 'mineOreVein' && Number(args.targetCount || args.count) > 0) return 600000
     if (['buildHouse', 'buildTower', 'buildBridge', 'buildWall', 'buildShelter', 'craft', 'craftGear'].includes(name)) return 240000
+    if (name === 'mineBlock') return 600000
+    if (name === 'smelt') return 600000
+    if (name === 'buildNetherPortal') return 600000
+    if (name === 'enterPortal') return 120000
+    if (name === 'obtainBlazeRods' || name === 'obtainEnderPearls') return 600000
+    if (name === 'findStronghold') return 900000
+    if (name === 'activateEndPortal') return 300000
+    if (name === 'fightEnderDragon') return 900000
     return undefined
   }
 
@@ -501,6 +510,8 @@ class Brain {
 
   _buildPlan (goal) {
     const g = String(goal || '').toLowerCase()
+    const longPlan = this._buildLongGoalPlan(g)
+    if (longPlan) return longPlan
     const S = (name, args, note) => ({ name, args: args || {}, note, done: false })
     const inventory = S('inventory', {}, '检查背包和手持装备')
     const collect = S('collect', { radius: 12 }, '采集附近可采集方块并拾取掉落物')
@@ -579,6 +590,187 @@ class Brain {
     return plan
   }
 
+  _buildLongGoalPlan (g) {
+    const S = (name, args, note) => ({ name, args: args || {}, note, done: false })
+    const finish = (steps) => {
+      const plan = { steps, loop: false, goal: this.goal || g, activeStep: 0, status: 'running', note: '长期目标已拆解为依赖链，会自动按顺序推进并跳过已满足的步骤。', updatedAt: Date.now() }
+      return plan
+    }
+
+    const prep = [
+      S('inventory', {}, '检查背包和手持装备'),
+      S('craftPlanks', {}, '砍树并合成足够木板'),
+      S('craft', { name: 'crafting_table' }, '制作并放置工作台'),
+      S('craftGear', {}, '制作木质工具与基础装备')
+    ]
+    const ironGear = [
+      S('mineBlock', { name: 'stone', count: 11 }, 'mine cobblestone for furnace and stone pickaxe'),
+      S('craft', { name: 'stone_pickaxe' }, 'craft stone pickaxe'),
+      S('craft', { name: 'furnace' }, 'craft furnace'),
+      S('mineOreVein', { name: 'coal_ore', targetCount: 6 }, 'mine coal for fuel'),
+      S('mineOreVein', { name: 'iron_ore', targetCount: 5 }, 'mine iron ore'),
+      S('smelt', { input: 'raw_iron', output: 'iron_ingot', count: 5 }, 'smelt iron ingots'),
+      S('craft', { name: 'iron_pickaxe' }, 'craft iron pickaxe'),
+      S('craft', { name: 'iron_sword' }, 'craft iron sword')
+    ]
+    const diamondTool = [
+      S('mineOreVein', { name: 'diamond_ore', targetCount: 3 }, 'mine diamonds'),
+      S('craft', { name: 'diamond_pickaxe' }, 'craft diamond pickaxe')
+    ]
+    const netherPortal = diamondTool.concat([
+      S('mineBlock', { name: 'obsidian', count: 10 }, 'mine obsidian'),
+      S('mineBlock', { name: 'gravel', count: 1, output: 'flint' }, 'mine gravel for flint'),
+      S('craft', { name: 'flint_and_steel' }, 'craft flint and steel'),
+      S('buildNetherPortal', {}, 'build and light nether portal')
+    ])
+    const blazeRun = netherPortal.concat([
+      S('enterPortal', { dimension: 'the_nether' }, '进入下界'),
+      S('obtainBlazeRods', { count: 6 }, '击败烈焰人获取烈焰棒'),
+      S('enterPortal', { dimension: 'overworld' }, '返回主世界')
+    ])
+    const dragonRun = prep.concat(ironGear, blazeRun, [
+      S('obtainEnderPearls', { count: 12 }, '击败末影人获取末影珍珠'),
+      S('craft', { name: 'blaze_powder', count: 6 }, '合成烈焰粉'),
+      S('craft', { name: 'ender_eye', count: 12 }, '合成末影之眼'),
+      S('findStronghold', {}, '用末影之眼定位并进入要塞'),
+      S('activateEndPortal', {}, '激活末地传送门'),
+      S('enterPortal', { dimension: 'the_end' }, '进入末地'),
+      S('fightEnderDragon', {}, '摧毁末影水晶并击杀末影龙'),
+      S('inventory', {}, '确认战利品')
+    ])
+
+    if (/(击杀|打败|击败|打死|干掉|屠|杀死|杀).*(末影龙|巨龙)|末影龙|ender\s*dragon|打龙|屠龙/.test(g)) {
+      return finish(dragonRun)
+    }
+    if (/(去|前往|到达|进入).*(末地|末界)|末地|末界|the\s*end|去末地|前往末地/.test(g)) {
+      return finish(prep.concat(ironGear, blazeRun, [
+        S('obtainEnderPearls', { count: 12 }, '击败末影人获取末影珍珠'),
+        S('craft', { name: 'blaze_powder', count: 6 }, '合成烈焰粉'),
+        S('craft', { name: 'ender_eye', count: 12 }, '合成末影之眼'),
+        S('findStronghold', {}, '用末影之眼定位并进入要塞'),
+        S('activateEndPortal', {}, '激活末地传送门'),
+        S('enterPortal', { dimension: 'the_end' }, '进入末地')
+      ]))
+    }
+    if (/(找|寻找|定位|找到).*(要塞|末地传送门)|要塞|stronghold|find\s*stronghold/.test(g)) {
+      return finish(prep.concat([
+        S('obtainEnderPearls', { count: 12 }, '击败末影人获取末影珍珠'),
+        S('craft', { name: 'blaze_powder', count: 6 }, '合成烈焰粉'),
+        S('craft', { name: 'ender_eye', count: 12 }, '合成末影之眼'),
+        S('findStronghold', {}, '用末影之眼定位并进入要塞')
+      ]))
+    }
+    if (/(激活|开启|点亮).*(末地传送门|传送门)|激活.*传送门|activate.*portal/.test(g)) {
+      return finish(prep.concat([
+        S('obtainEnderPearls', { count: 12 }, '击败末影人获取末影珍珠'),
+        S('craft', { name: 'blaze_powder', count: 6 }, '合成烈焰粉'),
+        S('craft', { name: 'ender_eye', count: 12 }, '合成末影之眼'),
+        S('findStronghold', {}, '用末影之眼定位并进入要塞'),
+        S('activateEndPortal', {}, '激活末地传送门')
+      ]))
+    }
+    if (/(获取|获得|收集|打|刷|得到).*(烈焰棒|烈焰人|烈焰)|烈焰棒|烈焰人|blaze/.test(g)) {
+      return finish(prep.concat(ironGear, blazeRun))
+    }
+    if (/(获取|获得|收集|打|刷|得到).*(末影珍珠|末影人|小黑)|末影珍珠|末影人|ender\s*pearl|enderman/.test(g)) {
+      return finish(prep.concat(ironGear, [
+        S('obtainEnderPearls', { count: 12 }, '击败末影人获取末影珍珠')
+      ]))
+    }
+    if (/(合成|制作|制造|打造).*(末影之眼|眼睛)|末影之眼|ender\s*eye/.test(g)) {
+      return finish(prep.concat([
+        S('obtainEnderPearls', { count: 12 }, '击败末影人获取末影珍珠'),
+        S('craft', { name: 'blaze_powder', count: 6 }, '合成烈焰粉'),
+        S('craft', { name: 'ender_eye', count: 12 }, '合成末影之眼')
+      ]))
+    }
+    if (/(去|前往|进入|到达).*(下界|地狱)|下界|地狱|nether/.test(g)) {
+      return finish(prep.concat(ironGear, netherPortal, [
+        S('enterPortal', { dimension: 'the_nether' }, '进入下界')
+      ]))
+    }
+    if (/(采集|收集|挖).*(黑曜石)|黑曜石|obsidian/.test(g)) {
+      return finish(prep.concat(ironGear, diamondTool, [
+        S('mineBlock', { name: 'obsidian', count: 10 }, '采集黑曜石')
+      ]))
+    }
+    if (/(准备|升级|制作|打造).*(装备|钻石|铁)|钻石装备|铁装备|龙战装备|装备升级/.test(g)) {
+      return finish(prep.concat(ironGear, diamondTool, [
+        S('craft', { name: 'diamond_pickaxe' }, '制作钻石镐'),
+        S('craft', { name: 'iron_sword' }, '制作铁剑'),
+        S('armor', {}, '自动装备最好护甲'),
+        S('weapon', {}, '自动装备最好武器')
+      ]))
+    }
+    return null
+  }
+
+  _stepReady (step, state) {
+    const items = (state.inventory && Array.isArray(state.inventory.items)) ? state.inventory.items : []
+    const has = name => items.some(i => String(i && i.name || '').toLowerCase() === name)
+    const count = name => items.filter(i => String(i && i.name || '').toLowerCase() === name).reduce((s, i) => s + Number(i.count || 0), 0)
+    const hasAnySuffix = suffix => items.some(i => String(i && i.name || '').toLowerCase().endsWith(suffix))
+    const dim = String((state.bot && state.bot.dimension) || '').toLowerCase()
+    const isNether = dim.includes('nether')
+    const isEnd = dim.includes('end')
+    const isOverworld = dim.includes('overworld')
+    const name = step && step.name
+    const args = (step && step.args) || {}
+
+    switch (name) {
+      case 'inventory': return true
+      case 'craftPlanks': {
+        let n = 0
+        for (const s of ['oak_planks', 'birch_planks', 'spruce_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'crimson_planks', 'warped_planks', 'cherry_planks', 'bamboo_planks']) n += count(s)
+        return n >= 16
+      }
+      case 'craft': {
+        const target = String(args.name || args.item || '').toLowerCase()
+        if (target === 'crafting_table') return has('crafting_table')
+        if (target) return has(target)
+        return false
+      }
+      case 'craftGear': return hasAnySuffix('_pickaxe') && hasAnySuffix('_sword')
+      case 'mineOreVein': {
+        const ore = String(args.name || '').toLowerCase()
+        const need = Number(args.targetCount || args.count) || 1
+        const drop = {
+          iron_ore: 'raw_iron', gold_ore: 'raw_gold', copper_ore: 'raw_copper',
+          coal_ore: 'coal', diamond_ore: 'diamond', redstone_ore: 'redstone',
+          lapis_ore: 'lapis_lazuli', emerald_ore: 'emerald', nether_quartz_ore: 'quartz'
+        }[ore]
+        if (drop) return count(drop) >= need
+        if (ore === 'iron_ore' && count('iron_ingot') >= need) return true
+        if (ore === 'gold_ore' && count('gold_ingot') >= need) return true
+        return false
+      }
+      case 'mineBlock': {
+        const target = String(args.name || '').toLowerCase()
+        const need = Number(args.count) || 1
+        const drop = String(args.output || MINE_DROP_NAMES[target] || target).toLowerCase()
+        return count(drop) >= need || count(target) >= need
+      }
+      case 'smelt': {
+        const out = String(args.output || '').toLowerCase()
+        return out ? count(out) >= (Number(args.count) || 1) : false
+      }
+      case 'obtainBlazeRods': return count('blaze_rod') >= (Number(args.count) || 1) || count('blaze_powder') >= (Number(args.count) || 1) * 2
+      case 'obtainEnderPearls': return count('ender_pearl') >= (Number(args.count) || 1)
+      case 'enterPortal': {
+        const want = String(args.dimension || '').toLowerCase()
+        if (want === 'the_nether' || want.includes('nether')) return isNether
+        if (want === 'the_end' || want === 'end') return isEnd
+        if (want === 'overworld') return isOverworld
+        return false
+      }
+      case 'buildNetherPortal': return isNether || isEnd
+      case 'activateEndPortal': return isEnd
+      case 'findStronghold': return isEnd
+      case 'fightEnderDragon': return false
+      default: return false
+    }
+  }
+
   _autoCompletePrepSteps (snapshot) {
     const plan = this.plan
     if (!plan || !Array.isArray(plan.steps) || plan.steps.length === 0) return
@@ -597,18 +789,7 @@ class Brain {
       const idx = Math.min(plan.activeStep || 0, plan.steps.length - 1)
       const step = plan.steps[idx]
       if (!step || step.done) break
-      let ready = false
-      if (step.name === 'inventory') {
-        ready = true
-      } else if (step.name === 'craftPlanks') {
-        ready = countPlanks >= 16
-      } else if (step.name === 'craft' && step.args && step.args.name === 'crafting_table') {
-        ready = has('crafting_table')
-      } else if (step.name === 'craftGear') {
-        ready = hasPickaxe && hasSword
-      } else {
-        break
-      }
+      const ready = this._stepReady(step, state)
       if (!ready) break
       step.done = true
       step.note = (step.note || '') + '已检查，自动跳过'

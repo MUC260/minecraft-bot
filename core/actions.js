@@ -648,6 +648,15 @@ async function craftItem (bot, itemName, ctx, count = 1, table = null) {
   if (!def) return false
   let recipes = bot.recipesFor(def.id, null, count, table)
   recipes = Array.isArray(recipes) ? recipes : []
+  // Recipes that need a 3x3 grid (furnace, iron/diamond tools, ...) are not
+  // returned when no crafting table is supplied. Make/place one and re-query
+  // instead of reporting a false failure.
+  if (!recipes.length && !table) {
+    table = await ensureCraftingTable(bot, ctx)
+    if (!table) return false
+    recipes = bot.recipesFor(def.id, null, count, table)
+    recipes = Array.isArray(recipes) ? recipes : []
+  }
   if (!recipes.length) return false
   let recipe = recipes.find(r => !r.requiresTable) || recipes[0]
   if (!recipe) return false
@@ -2085,6 +2094,97 @@ function chooseReachableExploreTarget (bot, distance, preferredDirection = '') {
   return best
 }
 
+function countInventoryItem (bot, name) {
+  const n = String(name || '').toLowerCase()
+  return (bot.inventory && typeof bot.inventory.items === 'function' ? bot.inventory.items() : []).reduce((sum, i) => String(i && i.name || '').toLowerCase() === n ? sum + Number(i.count || 0) : sum, 0)
+}
+
+function dimName (bot) {
+  return String((bot.game && bot.game.dimension) || (bot.entity && bot.entity.dimension) || '').toLowerCase()
+}
+
+function findBlocksByPredicate (bot, predicate, radius = 16, count = 256) {
+  if (!bot.findBlocks || !bot.entity) return []
+  try {
+    const positions = bot.findBlocks({ matching: block => { try { return !!predicate(block) } catch { return false } }, maxDistance: radius, count })
+    return (positions || []).map(pos => bot.blockAt(pos)).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+async function ensureFurnaceBlock (bot, ctx) {
+  let existing = findNearestBlockBy(bot, b => lowerBlockName(b) === 'furnace', 8, 16)
+  if (existing) return existing
+  await placeSpecificBlockNearby(bot, ctx, 'furnace')
+  return findNearestBlockBy(bot, b => lowerBlockName(b) === 'furnace', 8, 16)
+}
+
+async function findPortalSite (bot, ctx) {
+  const here = bot.entity.position
+  const yaw = Number(bot.entity.yaw) || 0
+  for (let i = 0; i < 8; i++) {
+    const ang = yaw + (i * Math.PI / 4)
+    const dx = -Math.round(Math.sin(ang)) * 4
+    const dz = -Math.round(Math.cos(ang)) * 4
+    const bx = Math.floor(here.x) + dx
+    const bz = Math.floor(here.z) + dz
+    const by = Math.floor(here.y)
+    let clear = true
+    for (let y = 0; y < 5 && clear; y++) {
+      for (let x = 0; x < 4 && clear; x++) {
+        const b = bot.blockAt(new Vec3(bx + x, by + y, bz))
+        if (!b) { clear = false; break }
+        if (b.boundingBox !== 'empty') { clear = false; break }
+      }
+    }
+    if (clear) return { x: bx, y: by, z: bz }
+  }
+  return null
+}
+
+async function ignitePortal (bot, ctx, framePositions) {
+  let igniter = findInventoryItemByName(bot, 'flint_and_steel')
+  if (!igniter) igniter = findInventoryItemByName(bot, 'fire_charge')
+  if (!igniter) return false
+  const frame = framePositions.find(p => {
+    const b = bot.blockAt(p)
+    return b && b.name && String(b.name).toLowerCase() === 'obsidian'
+  }) || framePositions[0]
+  if (!frame) return false
+  try { await bot.equip(igniter, 'hand') } catch { return false }
+  try { await bot.lookAt(frame.position.offset(0.5, 0.5, 0.5), true) } catch {}
+  try { await raceWithAbort(bot.activateBlock(frame), ctx, () => {}) } catch {}
+  const deadline = Date.now() + 3000
+  while (Date.now() < deadline) {
+    throwIfAborted(ctx)
+    if (findNearestBlockBy(bot, b => lowerBlockName(b) === 'nether_portal', 6, 16)) return true
+    await sleep(200, ctx)
+  }
+  return !!findNearestBlockBy(bot, b => lowerBlockName(b) === 'nether_portal', 6, 16)
+}
+
+async function throwEnderEye (bot, ctx, eyeItem) {
+  if (!eyeItem) return null
+  try { await bot.equip(eyeItem, 'hand') } catch { return null }
+  try { await bot.lookAt(bot.entity.position.offset(0, 1.5, -1), true) } catch {}
+  try { await raceWithAbort(bot.activateItem(), ctx, () => {}) } catch { return null }
+  const deadline = Date.now() + 4000
+  while (Date.now() < deadline) {
+    throwIfAborted(ctx)
+    const eye = bot.nearestEntity(e => e && e.name === 'eye_of_ender')
+    if (eye && eye.position) {
+      const dx = eye.position.x - bot.entity.position.x
+      const dz = eye.position.z - bot.entity.position.z
+      const len = Math.hypot(dx, dz)
+      if (len > 0.3) return { x: dx / len, z: dz / len }
+    }
+    await sleep(100, ctx)
+  }
+  return null
+}
+
+
 const handlers = {
   chat: async (bot, args) => {
     const message = String(args.message || '').slice(0, 100)
@@ -2851,6 +2951,217 @@ const handlers = {
     if (!entry) throw new Error('建筑教程里没有: ' + (args.id || '') + '，可用: ' + knowledge.listBuildingIds().join(', '))
     return JSON.stringify({ id: entry.id, name: entry.name, category: entry.category, guide: entry.guide })
   },
+  mineBlock: async (bot, args, ctx) => {
+    const name = String(args.name || '').toLowerCase()
+    const count = Math.max(1, Number(args.count || args.amount || 1))
+    const output = String(args.output || '').toLowerCase()
+    const dropName = output || ({ stone: 'cobblestone', deepslate: 'cobbled_deepslate', grass_block: 'dirt', dirt: 'dirt', gravel: 'gravel', sand: 'sand', obsidian: 'obsidian' }[name] || name)
+    const maxAttempts = Math.max(1, Math.min(Number(args.maxAttempts || 24), 80))
+    let lastErr = null
+    for (let i = 0; i < maxAttempts; i++) {
+      throwIfAborted(ctx)
+      if (countInventoryItem(bot, dropName) >= count) break
+      try {
+        const r = await handlers.collect(bot, { name, radius: 16, moveDistance: 8 }, ctx)
+        if (r && r.preempted) return r
+      } catch (err) {
+        lastErr = String(err && err.message ? err.message : err)
+      }
+      await sleep(150, ctx)
+    }
+    const got = countInventoryItem(bot, dropName)
+    if (got >= count) return 'mined ' + dropName + ' x' + got + ' (target ' + count + ')'
+    if (got > 0) return 'mined ' + dropName + ' x' + got + ' of ' + count
+    throw new Error(lastErr || ('not enough ' + dropName + ': have ' + got + '/' + count))
+  },
+
+  smelt: async (bot, args, ctx) => {
+    const input = String(args.input || '').toLowerCase()
+    const output = String(args.output || '').toLowerCase()
+    const count = Math.max(1, Number(args.count || args.amount || 1))
+    const fuel = String(args.fuel || 'coal').toLowerCase()
+    if (!input || !output) throw new Error('smelt needs input and output')
+    if (countInventoryItem(bot, output) >= count) return 'already have ' + output + ' x' + countInventoryItem(bot, output)
+    const fBlock = await ensureFurnaceBlock(bot, ctx)
+    if (!fBlock || !fBlock.position) throw new Error('no furnace available')
+    let lastErr = null
+    for (let i = 0; i < Math.max(count, 6); i++) {
+      throwIfAborted(ctx)
+      if (countInventoryItem(bot, output) >= count) break
+      let inputItem = findInventoryItemByName(bot, input)
+      if (!inputItem) {
+        const alt = { raw_iron: 'iron_ore', raw_gold: 'gold_ore', raw_copper: 'copper_ore' }[input]
+        if (alt) inputItem = findInventoryItemByName(bot, alt)
+      }
+      const fuelItem = findInventoryItemByName(bot, fuel)
+      if (!inputItem || !fuelItem) { lastErr = !inputItem ? ('no input ' + input) : ('no fuel ' + fuel); break }
+      try {
+        const furnace = await raceWithAbort(bot.openFurnace(fBlock), ctx, () => closeOpenWindow(bot))
+        await furnace.putInput(inputItem.type, null, 1)
+        await furnace.putFuel(fuelItem.type, null, 1)
+        await sleep(9000, ctx)
+        try { await furnace.takeOutput() } catch {}
+        closeOpenWindow(bot)
+      } catch (err) {
+        lastErr = String(err && err.message ? err.message : err)
+        closeOpenWindow(bot)
+        await sleep(800, ctx)
+      }
+    }
+    const got = countInventoryItem(bot, output)
+    if (got >= count) return 'smelted ' + output + ' x' + got
+    if (got > 0) return 'smelted ' + output + ' x' + got + ' of ' + count
+    throw new Error(lastErr || ('smelt failed for ' + output))
+  },
+
+  buildNetherPortal: async (bot, args, ctx) => {
+    const obsidian = findInventoryItemByName(bot, 'obsidian')
+    if (!obsidian) throw new Error('no obsidian in inventory')
+    const site = await findPortalSite(bot, ctx)
+    if (!site) throw new Error('no room to build nether portal')
+    const positions = []
+    for (let y = 0; y < 5; y++) {
+      for (let x = 0; x < 4; x++) {
+        if (x === 0 || x === 3 || y === 0 || y === 4) positions.push(new Vec3(site.x + x, site.y + y, site.z))
+      }
+    }
+    let placed = 0
+    for (const pos of positions) {
+      throwIfAborted(ctx)
+      const r = await placeSpecificItemAt(bot, pos, ctx, obsidian)
+      if (r && r.preempted) throw abortError(r.reason || 'reactive preempt')
+      if (r === true) placed++
+      await sleep(80, ctx)
+    }
+    if (placed < 10) throw new Error('portal frame incomplete: ' + placed + '/10')
+    const ignited = await ignitePortal(bot, ctx, positions)
+    if (!ignited) return 'nether portal frame built (' + placed + ' obsidian) but not lit; need flint_and_steel or fire_charge'
+    return 'nether portal built and lit (' + placed + ' obsidian)'
+  },
+
+  enterPortal: async (bot, args, ctx) => {
+    const portal = findNearestBlockBy(bot, b => {
+      const n = lowerBlockName(b)
+      return n === 'nether_portal' || n === 'end_portal' || n === 'end_gateway'
+    }, 12, 24)
+    if (!portal) throw new Error('no portal block nearby')
+    const nav = await pathNear(bot, ctx, portal.position.x, portal.position.y, portal.position.z, 1.5, 30000)
+    if (nav && nav.preempted) return nav
+    if (nav && !nav.ok) throw new Error(nav.reason || 'cannot reach portal')
+    const startDim = dimName(bot)
+    const deadline = Date.now() + 20000
+    while (Date.now() < deadline) {
+      throwIfAborted(ctx)
+      if (dimName(bot) !== startDim) return 'entered ' + dimName(bot)
+      await sleep(400, ctx)
+    }
+    return 'stood in portal; dimension change pending'
+  },
+
+  obtainBlazeRods: async (bot, args, ctx) => {
+    const need = Math.max(1, Number(args.count || 1))
+    if (countInventoryItem(bot, 'blaze_rod') >= need) return 'already have blaze_rod x' + countInventoryItem(bot, 'blaze_rod')
+    const r = await handlers.hunt(bot, { name: 'blaze', max: 40 }, ctx)
+    if (r && r.preempted) return r
+    const got = countInventoryItem(bot, 'blaze_rod')
+    if (got >= need) return 'obtained blaze_rod x' + got
+    if (got > 0) return 'obtained blaze_rod x' + got + ' of ' + need
+    throw new Error('no blaze nearby to farm')
+  },
+
+  obtainEnderPearls: async (bot, args, ctx) => {
+    const need = Math.max(1, Number(args.count || 1))
+    if (countInventoryItem(bot, 'ender_pearl') >= need) return 'already have ender_pearl x' + countInventoryItem(bot, 'ender_pearl')
+    const r = await handlers.hunt(bot, { name: 'enderman', max: 40 }, ctx)
+    if (r && r.preempted) return r
+    const got = countInventoryItem(bot, 'ender_pearl')
+    if (got >= need) return 'obtained ender_pearl x' + got
+    if (got > 0) return 'obtained ender_pearl x' + got + ' of ' + need
+    throw new Error('no enderman nearby to farm')
+  },
+
+  findStronghold: async (bot, args, ctx) => {
+    const eye = findInventoryItemByName(bot, 'ender_eye')
+    if (!eye) throw new Error('no ender_eye to locate stronghold')
+    let lastDir = null
+    for (let i = 0; i < 10; i++) {
+      throwIfAborted(ctx)
+      const dir = await throwEnderEye(bot, ctx, eye)
+      if (dir) {
+        lastDir = dir
+        const step = 60
+        const tx = bot.entity.position.x + dir.x * step
+        const tz = bot.entity.position.z + dir.z * step
+        const nav = await pathNearXZ(bot, ctx, tx, tz, 3, 60000)
+        if (nav && nav.preempted) return nav
+        if (nav && !nav.ok) throw new Error(nav.reason || 'cannot follow ender eye')
+      } else {
+        break
+      }
+    }
+    if (lastDir) return 'followed ender eyes toward stronghold; now near ' + Math.floor(bot.entity.position.x) + ',' + Math.floor(bot.entity.position.z)
+    return 'threw ender eyes but could not track direction; search area near ' + Math.floor(bot.entity.position.x) + ',' + Math.floor(bot.entity.position.z)
+  },
+
+  activateEndPortal: async (bot, args, ctx) => {
+    const eye = findInventoryItemByName(bot, 'ender_eye')
+    if (!eye) throw new Error('no ender_eye to activate portal')
+    const frames = findBlocksByPredicate(bot, b => lowerBlockName(b) === 'end_portal_frame', 24, 256)
+    if (!frames.length) throw new Error('no end portal frames nearby')
+    let placed = 0
+    for (const frame of frames) {
+      throwIfAborted(ctx)
+      let hasEye = false
+      try { const props = frame.getProperties && frame.getProperties(); hasEye = !!(props && props.eye) } catch {}
+      if (hasEye) continue
+      const nav = await pathNear(bot, ctx, frame.position.x, frame.position.y, frame.position.z, 2.5, 30000)
+      if (nav && nav.preempted) return nav
+      if (nav && !nav.ok) continue
+      try { await bot.equip(eye, 'hand') } catch {}
+      try { await bot.lookAt(frame.position.offset(0.5, 0.5, 0.5), true) } catch {}
+      try { await raceWithAbort(bot.activateBlock(frame), ctx, () => {}) } catch {}
+      placed++
+      await sleep(400, ctx)
+    }
+    const portal = findNearestBlockBy(bot, b => lowerBlockName(b) === 'end_portal', 24, 32)
+    if (portal) return 'end portal activated (' + placed + ' eyes placed)'
+    return 'placed ' + placed + ' ender eyes; portal activation pending'
+  },
+
+  fightEnderDragon: async (bot, args, ctx) => {
+    try { await combat.equipBestMelee(bot) } catch {}
+    try { await combat.equipShield(bot) } catch {}
+    const deadline = Date.now() + 90000
+    while (Date.now() < deadline) {
+      throwIfAborted(ctx)
+      const crystal = bot.nearestEntity(e => e && e.name === 'end_crystal' && bot.entity.position.distanceTo(e.position) < 18)
+      if (crystal) {
+        const nav = await pathNear(bot, ctx, crystal.position.x, crystal.position.y, crystal.position.z, 3, 20000)
+        if (nav && nav.preempted) return nav
+        if (nav && nav.ok) {
+          try { await bot.lookAt(crystal.position.offset(0, 0.5, 0), true) } catch {}
+          try { await bot.attack(crystal) } catch {}
+        }
+        await sleep(700, ctx)
+        continue
+      }
+      const dragon = bot.nearestEntity(e => e && e.name === 'ender_dragon')
+      if (!dragon) break
+      const dist = bot.entity.position.distanceTo(dragon.position)
+      if (dist > 3) {
+        const nav = await pathNear(bot, ctx, dragon.position.x, dragon.position.y, dragon.position.z, 3, 20000)
+        if (nav && nav.preempted) return nav
+        if (nav && !nav.ok) { await sleep(1000, ctx); continue }
+      }
+      try { await bot.lookAt(dragon.position.offset(0, 1, 0), true) } catch {}
+      try { await bot.attack(dragon) } catch {}
+      await sleep(400, ctx)
+    }
+    const dragon = bot.nearestEntity(e => e && e.name === 'ender_dragon')
+    if (!dragon) return 'ender dragon defeated'
+    return 'dragon fight engaged'
+  },
+
   plan: async (bot, args) => {
     const brain = bot.brain
     if (!brain) throw new Error('brain 未挂载')
