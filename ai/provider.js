@@ -1,4 +1,4 @@
-// 单次请求（带超时）
+﻿// 单次请求（带超时）
 async function chatCompletionOnce ({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens }) {
   const url = String(baseUrl).replace(/\/+$/, '') + '/chat/completions'
   const body = { model, messages, temperature, max_tokens: maxTokens }
@@ -21,24 +21,40 @@ async function chatCompletionOnce ({ baseUrl, apiKey, model, messages, tools, te
     })
   } catch (e) {
     clearTimeout(timer)
-    throw new Error(`AI API 请求超时或失败: ${e.message}`)
+    throw new Error('AI API 请求超时或失败: ' + e.message)
   }
   clearTimeout(timer)
   const text = await res.text()
-  if (process.env.DEBUG_AI) console.log("[AI_DEBUG]", res.status, text.slice(0, 600))
-  if (!res.ok) throw new Error(`AI API ${res.status}: ${text.slice(0, 400)}`)
+  if (process.env.DEBUG_AI) console.log('[AI_DEBUG]', res.status, text.slice(0, 600))
+  if (!res.ok) throw new Error('AI API ' + res.status + ': ' + text.slice(0, 400))
   return JSON.parse(text)
 }
 
-// 主 API + 备用降级：主失败（网络/5xx/429）时自动尝试备用
+// 串行队列：matchfit 账户有并发上限，串行化所有 AI 请求，避免并发 429。
+let chain = Promise.resolve()
+function serialize (fn) {
+  const run = chain.then(fn, fn)
+  chain = run.then(() => {}, () => {})
+  return run
+}
+
+// 主 API + 备用降级：主失败（网络/5xx/429）时自动重试，再尝试备用
 async function chatCompletion (opts) {
-  try {
-    return await chatCompletionOnce(opts)
-  } catch (e) {
+  return serialize(async () => {
+    let lastErr
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await chatCompletionOnce(opts)
+      } catch (e) {
+        lastErr = e
+        const msg = String(e && e.message ? e.message : '')
+        if (!/\b429\b/.test(msg) || attempt >= 2) break
+        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)))
+      }
+    }
     const fb = opts.fallback
-    // 只有配置了备用且不是同一地址时才降级
     if (fb && fb.baseUrl && String(fb.baseUrl).replace(/\/+$/, '') !== String(opts.baseUrl || '').replace(/\/+$/, '')) {
-      if (process.env.DEBUG_AI) console.log('[AI_FALLBACK]', e.message, '→ 切换到备用 API')
+      if (process.env.DEBUG_AI) console.log('[AI_FALLBACK]', (lastErr && lastErr.message) || '', '→ 切换到备用 API')
       return await chatCompletionOnce({
         baseUrl: fb.baseUrl,
         apiKey: fb.apiKey,
@@ -49,8 +65,8 @@ async function chatCompletion (opts) {
         maxTokens: opts.maxTokens
       })
     }
-    throw e
-  }
+    throw lastErr
+  })
 }
 
 // 从文本中提取所有 JSON 数组元素（兼容 markdown 代码块、多数组、纯文本混排）

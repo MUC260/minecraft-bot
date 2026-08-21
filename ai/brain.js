@@ -986,11 +986,22 @@ actions 数组可以为空（如果只需要回复）。动作名必须是可用
 
     const content = message.content
     if (typeof content === 'string' && content.trim()) {
+      let text = content.trim()
+      // strip a leading markdown code fence if present
+      if (text.startsWith('```')) {
+        const parts = text.split('```')
+        if (parts.length >= 2) {
+          let body = parts[1] || ''
+          const nl = body.indexOf(String.fromCharCode(10))
+          if (nl >= 0 && nl <= 10) body = body.slice(nl + 1)
+          text = body.trim()
+        }
+      }
       try {
-        const parsed = JSON.parse(content)
+        const parsed = JSON.parse(text)
         if (parsed && typeof parsed.reply === 'string' && parsed.reply.trim()) return parsed.reply.trim()
       } catch {}
-      if (!content.trim().startsWith('{')) return content.trim().slice(0, 200)
+      if (!text.startsWith('{')) return text.slice(0, 200)
     }
 
     if (Array.isArray(message.tool_calls)) {
@@ -1006,7 +1017,6 @@ actions 数组可以为空（如果只需要回复）。动作名必须是可用
 
     return null
   }
-
   _buildMessages (snapshot) {
     const messages = [
       { role: 'system', content: this.systemPrompt },
