@@ -642,7 +642,7 @@ class Brain {
     if (/(击杀|打败|击败|打死|干掉|屠|杀死|杀).*(末影龙|巨龙)|末影龙|ender\s*dragon|打龙|屠龙/.test(g)) {
       return finish(dragonRun)
     }
-    if (/(去|前往|到达|进入).*(末地|末界)|末地|末界|the\s*end|去末地|前往末地/.test(g)) {
+    if (/(去|前往|到达|进入).*(末地|末界)|末地(?!传送门)|末界(?!传送门)|the\s*end|去末地|前往末地/.test(g)) {
       return finish(prep.concat(ironGear, blazeRun, [
         S('obtainEnderPearls', { count: 12 }, '击败末影人获取末影珍珠'),
         S('craft', { name: 'blaze_powder', count: 6 }, '合成烈焰粉'),
