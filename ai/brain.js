@@ -26,6 +26,7 @@ class Brain {
     this.holdPosition = false
     this.followTarget = null
     this.aiErrorStreak = 0
+    this.aiBackoffMs = 0
     this._offlineStep = 0
     this.history = []
     this._pendingAssistant = null
@@ -362,7 +363,18 @@ class Brain {
   }
 
   _scheduleNext () {
-    this._kick(this.config.intervalMs || 1500)
+    const intervalMs = Math.max(1000, Number(this.config.intervalMs) || 4000)
+    this._kick(Math.max(intervalMs, this.aiBackoffMs || 0))
+  }
+
+  _setAiBackoff (error) {
+    const message = String(error && error.message ? error.message : error || '')
+    const isRateLimited = /\b429\b|rate limit|限流/i.test(message)
+    const isTimeout = /timeout|timed out|aborted|超时/i.test(message)
+    const baseMs = isRateLimited ? 30000 : (isTimeout ? 10000 : 5000)
+    const multiplier = Math.min(Math.max(this.aiErrorStreak - 1, 0), 3)
+    this.aiBackoffMs = Math.min(baseMs * (2 ** multiplier), 120000)
+    return this.aiBackoffMs
   }
 
   _hasValidApiKey () {
@@ -608,7 +620,29 @@ class Brain {
     const step = plan.steps[idx]
     if (!step) return
 
-    if (!result || !result.ok || !call) return
+    // 失败也要记录：step.failures 累计失败次数，连续失败超过阈值则自动跳过换方案，
+    // 避免任务永远卡在同一动作上。
+    if (!result || !result.ok) {
+      step.failures = Number(step.failures || 0) + 1
+      step.lastFailReason = (result && result.reason) || (call ? ('动作 ' + call.name + ' 执行失败') : '执行失败')
+      step.updatedAt = Date.now()
+      const failLimit = Number(this.config.stepFailLimit) || 2
+      if (step.failures >= failLimit) {
+        logger.warn(`步骤 ${step.name} 连续失败 ${step.failures} 次，自动跳过换方案: ${step.lastFailReason}`)
+        this.agent.emit('log', { level: 'warn', message: `步骤 ${step.name} 连续失败，自动换方案` })
+        step.done = true
+        step.note = (step.note || '') + `连续失败 ${step.failures} 次（${step.lastFailReason}），自动跳过`
+        const advanced = this._advanceStep(plan, idx, 'fail')
+        plan.updatedAt = Date.now()
+        if (this.memory) this.memory.setPlan(plan)
+        this.agent.emit('aiPlan', { plan, at: Date.now() })
+        // 返回 true 提示上层本轮改走本地兜底，避免再次提交同一失败动作
+        return true
+      }
+      plan.updatedAt = Date.now()
+      if (this.memory) this.memory.setPlan(plan)
+      return false
+    }
 
     let target = -1
     if (step.name === call.name && !step.done) {
@@ -631,7 +665,7 @@ class Brain {
         }
       }
     }
-    if (target < 0) return
+    if (target < 0) return false
 
     for (let i = idx; i < target; i++) {
       const before = plan.steps[i]
@@ -644,11 +678,14 @@ class Brain {
     if (targetStep && !targetStep.done) {
       targetStep.done = true
       targetStep.note = (targetStep.note || '') + '已执行'
+      targetStep.failures = 0
+      targetStep.lastFailReason = ''
     }
     plan.activeStep = target
     this._advanceStep(plan, target, 'done')
     if (this.memory) this.memory.setPlan(plan)
     this.agent.emit('aiPlan', { plan, at: Date.now() })
+    return true
   }
 
   _offlineBuildPlan (snapshot) {
@@ -708,6 +745,14 @@ class Brain {
     const drops = Array.isArray(state.nearbyDrops) ? state.nearbyDrops : []
     if (drops.length) return [{ name: 'collect', args: { radius: 8 } }]
 
+    // 工具保养：每 8 步检查一次低耐久工具，有则先丢弃
+    const invItems = (state.inventory && Array.isArray(state.inventory.items)) ? state.inventory.items : []
+    const wornTool = invItems.find(i => {
+      const pct = Number(i.durabilityPct)
+      return Number.isFinite(pct) && pct < 30
+    })
+    if (wornTool && this._offlineStep % 8 === 0) return [{ name: 'checkTools', args: { threshold: 30 } }]
+
     const build = this._offlineBuildPlan(state)
     if (build) return build
 
@@ -729,6 +774,41 @@ class Brain {
 
     if (this._offlineStep % 6 === 0) return [{ name: 'collect', args: { radius: 16 } }]
     return [{ name: 'explore', args: { distance: 8 } }]
+  }
+
+  // 生存优先级：低血/低食/无装备时强制补给，避免 AI 在危险状态下自由行动。
+  // 返回动作数组或 null（无紧急需求）。
+  _survivalPriority (snapshot) {
+    const state = snapshot || {}
+    const bot = state.bot || {}
+    const health = Number(bot.health)
+    const food = Number(bot.food)
+
+    if (Number.isFinite(health) && health < 6) {
+      this.agent.emit('log', { level: 'warn', message: `生命值过低 (${health})，停止自由行动，先保命` })
+      return [{ name: 'eat', args: {} }]
+    }
+
+    if (Number.isFinite(food) && food < 6) {
+      this.agent.emit('log', { level: 'warn', message: `饥饿值过低 (${food})，先进食` })
+      return [{ name: 'eat', args: {} }]
+    }
+
+    // 有敌对生物且身上无武器/护甲时，先武装再应对
+    const hostiles = Array.isArray(state.nearbyHostiles) ? state.nearbyHostiles : []
+    const inventory = state.inventory
+    const items = (inventory && Array.isArray(inventory.items)) ? inventory.items : []
+    const hasWeapon = items.some(i => String(i && i.name || '').toLowerCase().includes('sword') || String(i && i.name || '').toLowerCase().includes('axe'))
+    const hasArmor = items.some(i => {
+      const n = String(i && i.name || '').toLowerCase()
+      return n.includes('helmet') || n.includes('chestplate') || n.includes('leggings') || n.includes('boots')
+    })
+    if (hostiles.length && !hasWeapon && !hasArmor) {
+      this.agent.emit('log', { level: 'warn', message: `附近有敌对生物且无武装，先装备` })
+      return [{ name: 'armor', args: {} }]
+    }
+
+    return null
   }
 
   async tick () {
@@ -764,6 +844,15 @@ class Brain {
     try {
       const snapshot = this.agent.snapshot()
       this._autoCompletePrepSteps(snapshot)
+
+      // 生存优先级：先保命/补给，再交给 AI 决策
+      const urgent = this._survivalPriority(snapshot)
+      if (urgent) {
+        this._dispatchPlan(urgent, snapshot)
+        this._scheduleNext()
+        return
+      }
+
       const data = await chatCompletion({
         baseUrl: this.config.baseUrl,
         apiKey: this.config.apiKey,
@@ -777,22 +866,108 @@ class Brain {
       let actions = this._normalizeActions(parseActions(data))
       if (!actions.length) actions = [{ name: 'explore', args: {} }]
       this.aiErrorStreak = 0
+      this.aiBackoffMs = 0
       this._dispatchPlan(actions, snapshot)
     } catch (e) {
       this.lastError = e.message
       this.aiErrorStreak++
-      logger.warn('AI 决策失败:', e.message)
-      this.agent.emit('log', { level: 'warn', message: 'AI 决策失败: ' + e.message })
+      const backoffMs = this._setAiBackoff(e)
+      logger.warn(`AI 决策失败，${Math.ceil(backoffMs / 1000)} 秒后重试:`, e.message)
+      this.agent.emit('log', { level: 'warn', message: `AI 决策失败，${Math.ceil(backoffMs / 1000)} 秒后重试: ${e.message}` })
       if (this.aiErrorStreak >= 3 && !this.holdPosition && !this.followTarget) {
         const snapshot = this.agent.snapshot()
-        const fallback = this._offlineActions(snapshot)
-        this._dispatchPlan(fallback, snapshot)
-        this.aiErrorStreak = 0
+        this._dispatchPlan(this._offlineActions(snapshot), snapshot)
       }
     } finally {
       this.ticking = false
     }
     this._scheduleNext()
+  }
+
+  /**
+   * 处理玩家 @ai 指令：暂停自主循环 → 调用 LLM 分析 → 执行动作 → 恢复
+   * @param {string} message - 玩家输入的指令文本
+   * @param {string} username - 玩家名
+   * @returns {Promise<{reply: string, actions: Array}>}
+   */
+  async ask (message, username) {
+    const isRunning = this.running
+    if (isRunning) this.stop()
+
+    const snapshot = this.agent.snapshot()
+    const payload = this._userPayload(snapshot)
+
+    // 构建 @ai 专用 prompt：告诉 AI 这是玩家直接指令，不是自主决策
+    const askPrompt = `你正在 Minecraft 中运行。玩家 @${username} 向你下达了指令。请分析指令，返回一个 JSON 对象格式的回复。
+
+指令：${message}
+
+当前世界状态：${JSON.stringify(snapshot)}
+
+可用工具：
+${JSON.stringify(TOOLS.map(t => ({ name: t.function.name, description: t.function.description })))}
+
+回复格式必须严格为 JSON：
+{
+  "reply": "给玩家的回复文字，简要说明你做了什么",
+  "actions": [{"name": "动作名", "args": {}}]
+}
+
+actions 数组可以为空（如果只需要回复）。动作名必须是可用工具中的名称。`
+
+    const messages = [
+      { role: 'system', content: this.systemPrompt },
+      { role: 'system', content: '当前处于玩家指令模式，直接执行玩家要求，不要自主决策。' },
+      { role: 'user', content: askPrompt }
+    ]
+
+    try {
+      // 注入到 history 用于上下文的连续
+      this._pushHistory('user', `${username}: ${message}`)
+
+      const data = await chatCompletion({
+        baseUrl: this.config.baseUrl,
+        apiKey: this.config.apiKey,
+        model: this.config.model,
+        messages,
+        tools: TOOLS,
+        temperature: 0.2,
+        maxTokens: 1200
+      })
+
+      let actions = this._normalizeActions(parseActions(data))
+      const reply = this._extractReply(data) || `已收到指令：${message}`
+
+      this._pushHistory('assistant', reply)
+
+      // 执行动作
+      if (actions.length && this.executor) {
+        this._dispatchPlan(actions, snapshot)
+      }
+
+      return { reply, actions }
+    } catch (e) {
+      this.lastError = e.message
+      logger.warn(`AI 指令处理失败: ${e.message}`)
+      return { reply: `处理指令时出错: ${e.message}`, actions: [] }
+    } finally {
+      if (isRunning) this.start()
+    }
+  }
+
+  _extractReply (data) {
+    // 尝试从 LLM 回复中提取 reply 字段
+    if (data && typeof data === 'object') {
+      if (data.reply) return data.reply
+      if (data.content && typeof data.content === 'string') {
+        try {
+          const parsed = JSON.parse(data.content)
+          if (parsed.reply) return parsed.reply
+        } catch {}
+        return data.content.slice(0, 200)
+      }
+    }
+    return null
   }
 
   _buildMessages (snapshot) {
@@ -808,10 +983,15 @@ class Brain {
   }
 
   _userPayload (snapshot) {
+    const plan = this.plan
+    const activeStep = plan && Array.isArray(plan.steps) && plan.steps.length
+      ? plan.steps[Math.min(plan.activeStep || 0, plan.steps.length - 1)]
+      : null
     return {
       worldState: snapshot,
       goal: this.goal,
-      plan: this.plan,
+      plan: plan,
+      activeStep: activeStep ? { name: activeStep.name, note: activeStep.note || '', failures: activeStep.failures || 0, lastFailReason: activeStep.lastFailReason || '' } : null,
       previousPlan: this.lastPlan.slice(0, 6),
       previousResults: this.lastResults.slice(-8),
       instruction: this._instruction()

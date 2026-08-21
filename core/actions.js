@@ -793,7 +793,9 @@ function kindForBlockName (blockName) {
   const n = String(blockName || '').toLowerCase()
   if (n.endsWith('_log') || n.endsWith('_stem') || n.endsWith('_hyphae') || n === 'mushroom_stem') return 'axe'
   if (n.endsWith('_ore') || n === 'ancient_debris') return 'pickaxe'
-  if (['dirt', 'grass_block', 'sand', 'gravel', 'clay', 'soul_sand'].includes(n)) return 'shovel'
+  // 与 lib/combat 的方块分类保持一致：石头类用镐，泥土/沙类用铲
+  if (combat.PICKAXE_BLOCKS && combat.PICKAXE_BLOCKS.has(n)) return 'pickaxe'
+  if (combat.SHOVEL_BLOCKS && combat.SHOVEL_BLOCKS.has(n)) return 'shovel'
   return null
 }
 
@@ -1042,8 +1044,11 @@ async function chopOneTree (bot, ctx, maxBlocks = 48, radius = 16) {
     )
     if (nav && nav.preempted) return nav
   }
-  if (!block) throw new Error('\u9644\u8fd1\u6ca1\u6709\u53ef\u5230\u8fbe\u7684\u6811\u6728\uff0c\u5df2\u5c1d\u8bd5\u6362\u65b9\u5411\u63a2\u7d22')
-  try { await combat.equipBestToolForBlock(bot, block.name) } catch {}
+  if (!block) throw new Error('???????????????????')
+  try {
+    const tool = await combat.equipBestToolForBlock(bot, block.name)
+    if (!tool) await ensureWoodenToolForBlock(bot, block.name, ctx)
+  } catch {}
   const result = await digReachableTree(bot, block.position, ctx, maxBlocks)
   if (result.preempted) return result
   if (!result.dug) throw new Error('\u627e\u5230\u4e86\u6811\u6728\uff0c\u4f46\u5f53\u524d\u89d2\u5ea6\u6216\u5730\u5f62\u4e0b\u65e0\u6cd5\u6316\u5230\u539f\u6728')
@@ -2606,6 +2611,26 @@ const handlers = {
       }
     }
     return text
+  },
+
+  // 检查并替换耐久度低的工具：把低于阈值的工具丢弃，为后续 craftGear 腾出空间。
+  checkTools: async (bot, args) => {
+    const threshold = Math.max(1, Math.min(99, Number(args.threshold ?? 30)))
+    const items = bot.inventory.items().filter(i => i)
+    const worn = combat.wornTools(items, threshold)
+    if (!worn.length) return '工具耐久度正常'
+    const dropped = []
+    for (const entry of worn) {
+      const item = entry.item
+      try {
+        // 只丢弃非手持的工具，避免把手上的工具扔掉后反而无法继续。
+        if (bot.heldItem && bot.heldItem.slot === item.slot) continue
+        await bot.tossStack(item)
+        dropped.push(`${item.displayName || item.name}(${entry.pct}%)`)
+      } catch {}
+    }
+    if (!dropped.length) return `有 ${worn.length} 件低耐久工具，但都不可丢弃（可能正手持）`
+    return `已丢弃低耐久工具: ${dropped.join(', ')}`
   },
 
   craft: async (bot, args, ctx) => {

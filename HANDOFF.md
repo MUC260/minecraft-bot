@@ -1,10 +1,10 @@
-﻿# 项目交接文档 / Handoff
+# 项目交接文档 / Handoff
 
 ## 项目概览
 - 项目路径：`D:\minecraft-bot`
 - GitHub：`https://github.com/MUC260/minecraft-bot`（当前为公开仓库）
 - 协作者：`BCZZB`
-- 最新已推送提交：`9ccc124 fix: make collect autonomous and improve AI action planning`
+- 最新已推送提交：`5535c8c feat: @ai 唤醒词 + AI 成员白名单功能`
 - 当前分支：`main`
 - 当前状态：本轮修复已提交到本地 `main`，已通过 `npm run check` 和 `npm test`
 
@@ -161,6 +161,61 @@ git -c http.sslVerify=false -c http.extraHeader="Host: github.com" push $url HEA
 6. GUI 体验：
    - 用户希望打开后不弹黑窗，已满足。
    - 下一步可以继续改进设置界面、日志显示、手动连接/断开按钮。
+
+## @ai 唤醒词 + AI 成员白名单功能（本次新增，commit 5535c8c）
+
+### 需求
+玩家在游戏聊天里 @机器人名字 即可唤醒 AI 对话；管理员可在游戏内管理成员权限和唤醒词。
+
+### 实现
+
+**唤醒词规则**：默认 `@机器人名字`（机器人叫什么名字就 @ 什么），支持自定义覆盖。
+- config 不写 `aiMention` → 自动取 `@config.mc.username`
+- config 写了 `aiMention` → 优先用自定义值
+- `!ai setword xxx` → 动态修改，下次连接以自定义优先
+
+**权限控制**：
+- owner（主人）默认可用所有 @ai 指令
+- `aiMembers` 白名单内的玩家可使用 @ai 对话
+- 未授权玩家 → 机器人私聊提示"未授权使用 AI"
+
+**核心文件改动**：
+- `core/chatCommander.js`：
+  - `_customAiMention` / `aiMention` 双字段：自定义优先，否则取 @机器人名
+  - `onBotReady(username)`：连接成功后同步唤醒词
+  - `_matchMention(raw)`：动态匹配 @机器人名（不区分大小写）
+  - `_handleAiMention(item)`：白名单校验 + 调用 `brain.ask()`
+  - `_handleAiAdmin(sub)`：!ai list/add/remove/clear/setword/help
+  - `updateAiConfig(cfg)`：后台/API 修改后同步
+- `ai/brain.js`：新增 `ask(message, username)` 方法
+  - 暂停自主循环 → 调用 LLM 分析玩家指令 → 执行动作 → 恢复
+- `api/routes.js`：新增 `GET/PUT /api/ai/config`、`GET /api/ai/players`
+- `api/server.js`：传入 commander 支持配置同步
+- `index.js`：监听 `commanderReady` 事件同步唤醒词
+- `core/agent.js`：连接成功后 emit `commanderReady` 事件
+
+**游戏内指令**：
+```
+!ai list          # 查看唤醒词和授权成员
+!ai add 玩家名     # 授权使用 @ai
+!ai remove 玩家名  # 移除授权
+!ai clear         # 清空授权
+!ai setword @自定义词  # 修改唤醒词
+!ai help          # 帮助
+```
+
+**配置文件**（config.json）：
+```json
+"ai": {
+  "aiMention": "@自定义唤醒词",  // 可选，不写则默认 @机器人名
+  "aiMembers": ["玩家A", "玩家B"]
+}
+```
+
+**API**：
+- `GET /api/ai/config` — 查询唤醒词和成员列表
+- `PUT /api/ai/config` — 修改唤醒词和成员列表（同步更新运行时）
+- `GET /api/ai/players` — 获取在线玩家（方便后台管理）
 
 ## 下次继续做事的建议顺序
 1. 先跑：

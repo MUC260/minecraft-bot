@@ -88,6 +88,86 @@ function mockBotForReactive () {
   brain.destroy()
 }
 
+// 2a. AI request failures back off instead of hammering the provider every tick.
+{
+  const executor = new EventEmitter()
+  const agent = { executor, connected: true, snapshot () { return {} }, emit () {} }
+  const brain = new Brain(agent, { intervalMs: 1500 })
+  brain.aiErrorStreak = 1
+  assert.strictEqual(brain._setAiBackoff(new Error('AI API 429: rate limit')), 30000, 'rate limits should wait at least 30 seconds')
+  brain.aiErrorStreak = 1
+  assert.strictEqual(brain._setAiBackoff(new Error('request timed out')), 10000, 'timeouts should wait at least 10 seconds')
+  brain.destroy()
+}
+
+// 2a2. Plan steps record failures and auto-skip after the configured limit.
+{
+  const executor = new EventEmitter()
+  const agent = { executor, connected: true, snapshot () { return {} }, emit () {} }
+  const brain = new Brain(agent, { intervalMs: 1500, stepFailLimit: 2 })
+  brain.plan = brain._buildPlan('挖矿')
+  brain.plan.activeStep = 0
+  const step = brain.plan.steps[0]
+  assert.strictEqual(step.failures || 0, 0, 'fresh step should have no failures')
+  const first = brain._advancePlan({ name: 'inventory' }, { ok: false, reason: 'no path' })
+  assert.strictEqual(brain.plan.steps[0].failures, 1, 'first failure should be recorded')
+  assert.strictEqual(first, false, 'first failure should not advance yet')
+  const second = brain._advancePlan({ name: 'inventory' }, { ok: false, reason: 'no path' })
+  assert.strictEqual(brain.plan.steps[0].failures, 2, 'second failure should be recorded')
+  assert.strictEqual(second, true, 'step should auto-skip after failing limit')
+  assert.strictEqual(brain.plan.steps[0].done, true, 'failed step should be marked done (skip)')
+  assert.ok(brain.plan.steps[0].lastFailReason, 'fail reason should be recorded')
+  brain.destroy()
+}
+
+// 2a3. Survival priority short-circuits normal AI decisions when health is low.
+{
+  const executor = new EventEmitter()
+  const agent = { executor, connected: true, snapshot () { return {} }, emit () {} }
+  const brain = new Brain(agent, { intervalMs: 1500, apiKey: 'sk-valid' })
+  const lowHealth = brain._survivalPriority({ bot: { health: 3, food: 20 }, nearbyHostiles: [], inventory: { items: [] } })
+  assert.strictEqual(lowHealth[0].name, 'eat', 'low health should force eat')
+  const lowFood = brain._survivalPriority({ bot: { health: 20, food: 4 }, nearbyHostiles: [], inventory: { items: [] } })
+  assert.strictEqual(lowFood[0].name, 'eat', 'low food should force eat')
+  const normal = brain._survivalPriority({ bot: { health: 20, food: 20 }, nearbyHostiles: [], inventory: { items: [{ name: 'iron_sword', count: 1 }] } })
+  assert.strictEqual(normal, null, 'healthy bot should have no urgent action')
+  brain.destroy()
+}
+
+// 2a4. Durability helpers work on prismarine-like items.
+{
+  const combat = require('../lib/combat')
+  const wornTool = { name: 'iron_pickaxe', maxDurability: 250, durabilityUsed: 200 }
+  const freshTool = { name: 'iron_pickaxe', maxDurability: 250, durabilityUsed: 10 }
+  const nonTool = { name: 'dirt', maxDurability: 0, durabilityUsed: null }
+  assert.strictEqual(combat.durabilityPercent(wornTool), 20, 'worn tool should report 20% durability')
+  assert.strictEqual(combat.durabilityPercent(freshTool), 96, 'fresh tool should report 96% durability')
+  assert.strictEqual(combat.durabilityPercent(nonTool), null, 'non-tool should report null durability')
+  const worn = combat.wornTools([wornTool, freshTool, nonTool], 30)
+  assert.strictEqual(worn.length, 1, 'only the worn tool should be flagged')
+  assert.strictEqual(worn[0].pct, 20, 'worn tool percent should be 20')
+}
+
+// 2a5. Tool selection skips nearly-broken tools and picks the best usable one.
+{
+  const combat = require('../lib/combat')
+  const brokenNetherite = { name: 'netherite_pickaxe', maxDurability: 2031, durabilityUsed: 2000, slot: 1 } // ~2%
+  const freshStone = { name: 'stone_pickaxe', maxDurability: 131, durabilityUsed: 0, slot: 2 }
+  const iron = { name: 'iron_pickaxe', maxDurability: 250, durabilityUsed: 5, slot: 3 }
+  // 挖铁矿石：铁镐应该是首选（下界合金镐快坏了被跳过）
+  const best = combat.toolForBlock('iron_ore', [brokenNetherite, iron, freshStone])
+  assert.strictEqual(best.name, 'iron_pickaxe', 'should prefer fresh iron over broken netherite')
+  // 挖石头（普通方块）也应匹配镐子
+  const stoneBest = combat.toolForBlock('stone', [freshStone, brokenNetherite])
+  assert.strictEqual(stoneBest.name, 'stone_pickaxe', 'plain stone should use a pickaxe')
+  // 泥土用铲子
+  const dirtBest = combat.toolForBlock('dirt', [{ name: 'stone_shovel', maxDurability: 131, durabilityUsed: 0, slot: 4 }])
+  assert.strictEqual(dirtBest.name, 'stone_shovel', 'dirt should use a shovel')
+  // 全部工具都坏时返回 null（空手）
+  const allBroken = combat.toolForBlock('iron_ore', [{ name: 'iron_pickaxe', maxDurability: 250, durabilityUsed: 250 }])
+  assert.strictEqual(allBroken, null, 'all broken tools should fall back to bare hands')
+}
+
 // 2b. Brain offline fallback keeps the bot busy when no valid API key is configured.
 {
   const executor = new EventEmitter()

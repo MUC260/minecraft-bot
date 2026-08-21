@@ -50,6 +50,11 @@ async function main () {
     brain.setExecutor(executor)
     mountBrain(agent.bot)
   })
+  // 机器人连接成功时，同步唤醒词为 @机器人名
+  agent.on('commanderReady', (username) => {
+    commander.onBotReady(username)
+    logger.info(`唤醒词已同步为 @${username}`)
+  })
 
   if (config.ai.enabled) {
     if (!config.ai.apiKey || /^sk-xxx$/i.test(String(config.ai.apiKey))) {
@@ -58,7 +63,7 @@ async function main () {
     brain.start()
   }
 
-  api.start(agent, brain, config)
+  api.start(agent, brain, config, commander)
 
   const shutdown = () => {
     logger.info('正在关闭...')

@@ -5,10 +5,10 @@ const { WebSocketServer } = require('ws')
 const logger = require('../lib/logger')
 const createRouter = require('./routes')
 
-function start (agent, brain, config) {
+function start (agent, brain, config, commander) {
   const app = express()
   app.use(express.json())
-  app.use('/api', createRouter(agent, brain, config))
+  app.use('/api', createRouter(agent, brain, config, commander))
   app.use(express.static(config.uiDir))
 
   const server = http.createServer(app)

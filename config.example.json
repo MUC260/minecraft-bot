@@ -27,8 +27,9 @@
         "model": "gpt-4o-mini",
         "temperature": 0.2,
         "maxTokens": 1200,
-        "intervalMs": 1500,
+        "intervalMs": 4000,
         "planAhead": true,
+        "aiMembers": [],
         "memoryFile": "",
         "memoryMaxMessages": 40,
         "memoryMaxChars": 32000
@@ -40,7 +41,9 @@
     "logging": {
         "file": true,
         "dir": "logs",
-        "name": "agent.log"
+        "name": "agent.log",
+        "maxSizeBytes": 5242880,
+        "maxBackups": 3
     },
     "reactive": {
         "lowHealthFleeThreshold": 8,

@@ -104,7 +104,193 @@ class ChatCommander {
     this._lastCommandAt = new Map()
     this.aiCommands = this.mc.aiCommands !== false
     this.commandPrefix = this.mc.commandPrefix == null ? '!' : String(this.mc.commandPrefix)
+    // @ai 唤醒词：默认 @机器人名（动态），config 有自定义值时优先用自定义
+    this._customAiMention = String((config && config.ai && config.ai.aiMention) || '').trim()
+    this.aiMention = this._customAiMention || '@' + String(this.mc.username || 'AIBot')
+    this.aiMembers = this._memberNames(config && config.ai && config.ai.aiMembers)
     this.agent.on('chat', (item) => this.onChat(item))
+  }
+
+  /** 机器人连接后调用，同步唤醒词为 @机器人名 */
+  onBotReady (username) {
+    if (!this._customAiMention) {
+      this.aiMention = '@' + String(username || this.mc.username || 'AIBot')
+    }
+  }
+
+  /** 后台动态更新 @ai 配置 */
+  updateAiConfig (aiConfig) {
+    const cfg = aiConfig || {}
+    if (cfg.aiMention !== undefined) {
+      this._customAiMention = String(cfg.aiMention || '').trim()
+      this.aiMention = this._customAiMention
+        || '@' + String(this.mc.username || 'AIBot')
+    }
+    if (cfg.aiMembers !== undefined) this.aiMembers = this._memberNames(cfg.aiMembers)
+  }
+
+  _memberNames (value) {
+    if (!value) return []
+    const list = Array.isArray(value) ? value : String(value).split(',')
+    return list.map(s => String(s || '').trim().toLowerCase()).filter(Boolean)
+  }
+
+  _isAiMember (username) {
+    if (this.isOwner(username)) return true
+    if (this.aiMembers.length === 0) return false
+    const name = String(username || '').trim().toLowerCase()
+    return this.aiMembers.includes(name)
+  }
+
+  _matchMention (raw) {
+    const text = String(raw || '').trim()
+    if (!text || !text.startsWith('@')) return null
+    // 唤醒词 = @机器人名，支持自定义覆盖
+    // 匹配 "@AIBot 指令" 或 "@AIBot指令"
+    const mention = this.aiMention.toLowerCase()
+    const lowered = text.toLowerCase()
+    if (lowered === mention) return ''
+    if (lowered.startsWith(mention + ' ') || lowered.startsWith(mention + '\u00A0')) {
+      return text.slice(mention.length).trim()
+    }
+    // 自定义唤醒词（完整匹配）
+    if (this._customAiMention) {
+      const custom = this._customAiMention.toLowerCase()
+      if (lowered === custom) return ''
+      if (lowered.startsWith(custom + ' ') || lowered.startsWith(custom + '\u00A0')) {
+        return text.slice(this._customAiMention.length).trim()
+      }
+    }
+    return null
+  }
+
+  async _handleAiMention (item) {
+    const raw = String(item.message || '').trim()
+    const query = this._matchMention(raw)
+    if (query === null) return false
+
+    const username = String(item.username || '')
+    if (!this._isAiMember(username)) {
+      this._ack(`@${username} 未授权使用 AI，请联系管理员开通。`)
+      return true
+    }
+    if (!this.brain || typeof this.brain.ask !== 'function') {
+      this._ack('AI 大脑未就绪，请稍后再试。')
+      return true
+    }
+    if (!query) {
+      this._ack('用法：' + this.aiMention + ' <指令>，例如：' + this.aiMention + ' 去附近砍树')
+      return true
+    }
+    const now = Date.now()
+    const key = 'ai:' + String(username || '').toLowerCase()
+    const last = this._lastCommandAt.get(key) || 0
+    if (now - last < 3000) return true
+    this._lastCommandAt.set(key, now)
+
+    item.handled = true
+    logger.info(`@ai 指令 ${username}: ${query}`)
+    this._ack(`@${username} 收到指令，AI 正在处理…`)
+
+    try {
+      const result = await this.brain.ask(query, username)
+      const reply = String(result && result.reply || '').trim()
+      if (reply) this._ack(reply)
+    } catch (e) {
+      logger.warn(`@ai 处理异常: ${e.message}`)
+      this._ack('AI 处理时出现异常，请稍后再试。')
+    }
+    return true
+  }
+
+  /**
+   * owner 管理员指令：!ai add/remove/list/setword xxx
+   * 返回 true 表示已处理，false 表示未匹配
+   */
+  _handleAiAdmin (sub, username) {
+    const cmd = String(sub || '').trim().toLowerCase()
+    const parts = cmd.split(/\s+/)
+    const action = parts[0]
+    const args = parts.slice(1)
+
+    // !ai list — 查看当前配置
+    if (action === 'list' || action === '查看') {
+      const members = this.aiMembers.length ? this.aiMembers.join('、') : '（空）'
+      this._ack('AI 唤醒词：' + this.aiMention + '　已授权成员：' + members)
+      return true
+    }
+
+    // !ai setword <词> — 修改唤醒词
+    if (action === 'setword' || action === '唤醒词' || action === '唤醒词=') {
+      const word = args.join(' ').trim()
+      if (!word) {
+        this._ack('用法：!ai setword <唤醒词>，例如：!ai setword @AI')
+        return true
+      }
+      const prev = this._customAiMention || '(默认@' + this.mc.username + ')'
+      this._customAiMention = word
+      this.aiMention = word
+      this.config.saveConfig ? this.config.saveConfig({ ai: { aiMention: word } }) : null
+      logger.info(`AI 唤醒词由 ${prev} 改为 ${word}`)
+      this._ack('AI 唤醒词已更新为：' + word)
+      return true
+    }
+
+    // !ai add <玩家> — 添加授权成员
+    if (action === 'add' || action === '添加' || action === '+') {
+      const target = args.join(' ').trim().toLowerCase()
+      if (!target) {
+        this._ack('用法：!ai add <玩家名>')
+        return true
+      }
+      if (this.aiMembers.includes(target)) {
+        this._ack(target + ' 已在授权列表中')
+        return true
+      }
+      this.aiMembers.push(target)
+      const members = this.aiMembers.slice()
+      if (this.config.saveConfig) this.config.saveConfig({ ai: { aiMembers: members } })
+      logger.info(`AI 授权成员添加：${target}`)
+      this._ack('已授权 ' + target + ' 使用 @ai，当前：' + this.aiMembers.join('、'))
+      return true
+    }
+
+    // !ai remove <玩家> — 移除授权成员
+    if (action === 'remove' || action === 'del' || action === '删除' || action === '-' || action === 'remove') {
+      const target = args.join(' ').trim().toLowerCase()
+      if (!target) {
+        this._ack('用法：!ai remove <玩家名>')
+        return true
+      }
+      const idx = this.aiMembers.indexOf(target)
+      if (idx < 0) {
+        this._ack(target + ' 不在授权列表中')
+        return true
+      }
+      this.aiMembers.splice(idx, 1)
+      const members = this.aiMembers.slice()
+      if (this.config.saveConfig) this.config.saveConfig({ ai: { aiMembers: members } })
+      logger.info(`AI 授权成员移除：${target}`)
+      this._ack('已移除 ' + target + ' 的 AI 授权，当前：' + (this.aiMembers.length ? this.aiMembers.join('、') : '（空）'))
+      return true
+    }
+
+    // !ai clear — 清空授权列表
+    if (action === 'clear' || action === '清空') {
+      this.aiMembers = []
+      if (this.config.saveConfig) this.config.saveConfig({ ai: { aiMembers: [] } })
+      logger.info('AI 授权列表已清空')
+      this._ack('AI 授权列表已清空')
+      return true
+    }
+
+    // !ai help — 帮助
+    if (!action || action === 'help' || action === '帮助') {
+      this._ack('AI 管理指令：!ai list / setword <词> / add <玩家> / remove <玩家> / clear')
+      return true
+    }
+
+    return false
   }
 
   _commandText (raw) {
@@ -138,9 +324,16 @@ class ChatCommander {
 
   onChat (item) {
     if (!item || !this.agent.connected || !this.agent.bot) return
-    if (!this.isOwner(item.username)) return
     const raw = String(item.message || '').trim()
     if (!raw) return
+
+    // @ai 唤醒词优先处理，任何玩家都可触发（白名单校验）
+    if (this._matchMention(raw) !== null) {
+      this._handleAiMention(item)
+      return
+    }
+
+    if (!this.isOwner(item.username)) return
     const prefixedCommand = this._commandText(raw)
     const prefix = this.commandPrefix == null ? '' : String(this.commandPrefix)
     const hasExplicitPrefix = prefixedCommand !== null
@@ -160,6 +353,14 @@ class ChatCommander {
     }
 
     const parsed = this.parse(command, item.username, { allowGoalFallback: hasExplicitPrefix || !prefix })
+
+    // 优先处理管理员指令（需要前缀，owner 权限）
+    if (hasExplicitPrefix && /^ai/.test(command) && this.isOwner(item.username)) {
+      const sub = command.replace(/^ai/, '').trim()
+      const handled = this._handleAiAdmin(sub, item.username)
+      if (handled) return
+    }
+
     if (!parsed) return
 
     item.handled = true
