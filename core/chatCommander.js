@@ -538,7 +538,7 @@ class ChatCommander {
       }
     }
 
-    if (/盖房子|盖房|建房子|建个房子|造房子|造个房子|盖个房|盖屋子|搭房子|搭个房子|建屋|盖屋|修房子|buildhouse|buildahouse|buildmeahouse/.test(text)) {
+    if (/盖房子|盖房|建房子|建个房子|造房子|造个房子|盖个房|盖屋子|搭房子|搭个房子|建屋|盖屋|修房子|做房子|做个房子|做一个房子|做个房|做一个房|buildhouse|buildahouse|buildmeahouse/.test(text)) {
       return {
         action: { name: 'buildHouse', args: {} },
         goal: '盖房子任务已开始，我会在附近找个位置，用背包里的建材搭一个房子。'
