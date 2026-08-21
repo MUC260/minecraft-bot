@@ -955,7 +955,7 @@ actions 数组可以为空（如果只需要回复）。动作名必须是可用
         messages,
         tools: TOOLS,
         temperature: 0.2,
-        maxTokens: 1200
+        maxTokens: this.config.maxTokens
       })
 
       let actions = this._normalizeActions(parseActions(data))
@@ -963,12 +963,13 @@ actions 数组可以为空（如果只需要回复）。动作名必须是可用
 
       this._pushHistory('assistant', reply)
 
-      // 执行动作
-      if (actions.length && this.executor) {
-        this._dispatchPlan(actions, snapshot)
+      // chat is delivered as the direct reply; dispatch only real tool actions
+      const toolActions = actions.filter(a => a.name !== 'chat')
+      if (toolActions.length && this.executor) {
+        this._dispatchPlan(toolActions, snapshot)
       }
 
-      return { reply, actions }
+      return { reply, actions: toolActions }
     } catch (e) {
       this.lastError = e.message
       logger.warn(`AI 指令处理失败: ${e.message}`)
@@ -979,17 +980,30 @@ actions 数组可以为空（如果只需要回复）。动作名必须是可用
   }
 
   _extractReply (data) {
-    // 尝试从 LLM 回复中提取 reply 字段
-    if (data && typeof data === 'object') {
-      if (data.reply) return data.reply
-      if (data.content && typeof data.content === 'string') {
-        try {
-          const parsed = JSON.parse(data.content)
-          if (parsed.reply) return parsed.reply
-        } catch {}
-        return data.content.slice(0, 200)
+    // OpenAI-style: read choices[0].message.content (JSON {reply} or plain text) and chat tool_calls
+    const message = data && data.choices && data.choices[0] && data.choices[0].message
+    if (!message) return null
+
+    const content = message.content
+    if (typeof content === 'string' && content.trim()) {
+      try {
+        const parsed = JSON.parse(content)
+        if (parsed && typeof parsed.reply === 'string' && parsed.reply.trim()) return parsed.reply.trim()
+      } catch {}
+      if (!content.trim().startsWith('{')) return content.trim().slice(0, 200)
+    }
+
+    if (Array.isArray(message.tool_calls)) {
+      for (const tc of message.tool_calls) {
+        if (tc && tc.function && tc.function.name === 'chat') {
+          try {
+            const args = JSON.parse(tc.function.arguments || '{}')
+            if (args && typeof args.message === 'string' && args.message.trim()) return args.message.trim().slice(0, 200)
+          } catch {}
+        }
       }
     }
+
     return null
   }
 

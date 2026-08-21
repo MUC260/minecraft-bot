@@ -361,7 +361,13 @@ class ChatCommander {
       if (handled) return
     }
 
-    if (!parsed) return
+    if (!parsed) {
+      // route plain natural-language owner chat to the AI conversation loop
+      if (!hasExplicitPrefix && this.aiCommands && this.brain && typeof this.brain.ask === 'function') {
+        this._handleConversation(item, raw)
+      }
+      return
+    }
 
     item.handled = true
     logger.info(`\u4e3b\u4eba\u6307\u4ee4 ${item.username}: ${raw}`)
@@ -380,6 +386,20 @@ class ChatCommander {
   }
 
 
+  async _handleConversation (item, raw) {
+    const username = String(item.username || '')
+    item.handled = true
+    logger.info(`主人聊天 ${username}: ${raw}`)
+    this._ack(`@${username} 收到，正在思考...`)
+    try {
+      const result = await this.brain.ask(raw, username)
+      const reply = String(result && result.reply || '').trim()
+      if (reply) this._ack(reply)
+    } catch (e) {
+      logger.warn(`聊天处理异常: ${e && e.message || e}`)
+      this._ack('AI 处理时出现异常，请稍后再试。')
+    }
+  }
   _ack (message) {
     const bot = this.agent && this.agent.bot
     const text = String(message || '').trim()

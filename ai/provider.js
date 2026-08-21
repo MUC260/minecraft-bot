@@ -8,7 +8,7 @@ async function chatCompletionOnce ({ baseUrl, apiKey, model, messages, tools, te
 
   // 请求超时（防止 AI API 响应慢导致 tick 卡死）
   const controller = new AbortController()
-  const timeoutMs = 45000
+  const timeoutMs = 90000
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
   let res
