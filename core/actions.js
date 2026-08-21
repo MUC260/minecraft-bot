@@ -531,12 +531,13 @@ function findLogItem (bot, material) {
     let m = String(material).toLowerCase()
     if (/^(wood|log|logs|tree|plank|planks|wooden|timber)$/.test(m)) m = ''
     if (m) {
-      items = items.filter(i => {
+      const matched = items.filter(i => {
         const n = String(i.name || '').toLowerCase()
         const dn = String(i.displayName || '').toLowerCase()
         const planks = logPlanksName(n)
         return n.includes(m) || dn.includes(m) || (planks && planks.includes(m))
       })
+      if (matched.length) items = matched
     }
   }
   items.sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
@@ -549,7 +550,8 @@ function findPlankItem (bot, material) {
     let m = String(material).toLowerCase()
     if (/^(wood|log|logs|tree|plank|planks|wooden|timber)$/.test(m)) m = ''
     if (m) {
-      items = items.filter(i => String(i.name || '').toLowerCase().includes(m) || String(i.displayName || '').toLowerCase().includes(m))
+      const matched = items.filter(i => String(i.name || '').toLowerCase().includes(m) || String(i.displayName || '').toLowerCase().includes(m))
+      if (matched.length) items = matched
     }
   }
   items.sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
@@ -709,6 +711,13 @@ async function craftOneItem (bot, itemName, ctx, count = 1) {
   if (WOOD_TOOL_ITEMS.has(itemName) || STONE_TOOL_ITEMS.has(itemName)) {
     table = await ensureCraftingTable(bot, ctx)
     if (!table) throw new Error('没有可用工作台')
+  }
+
+  if (itemName.endsWith('_planks')) {
+    const planks = await gatherAndCraftPlanks(bot, itemName, ctx, count)
+    if (planks && planks.preempted) return planks
+    if (planks) return '已准备板材: ' + planks + ' x' + Math.max(1, count)
+    throw new Error('无法制作板材: ' + itemName)
   }
 
   if (WOOD_TOOL_ITEMS.has(itemName) || itemName === 'stick') {
