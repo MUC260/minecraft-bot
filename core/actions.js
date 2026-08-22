@@ -2116,33 +2116,62 @@ function chooseReachableExploreTarget (bot, distance, preferredDirection = '') {
   if (vectors[preferredDirection]) ordered.push(preferredDirection)
   for (const name of ['north', 'south', 'east', 'west']) if (!ordered.includes(name)) ordered.push(name)
   // Diagonals often provide a route around a cliff face that blocks all four
-  // straight target points.
+  // straight target points; the intermediate octants add even more escape
+  // angles when mountains or water trap the bot.
   const diagonals = [[1, -1], [-1, -1], [1, 1], [-1, 1]]
+  const intermediates = []
+  for (let i = 0; i < 8; i++) {
+    const angle = (Math.PI * (2 * i + 1)) / 16
+    intermediates.push([Math.cos(angle), Math.sin(angle)])
+  }
   const candidates = ordered.map(name => ({ name, vector: vectors[name] }))
     .concat(diagonals.map((vector, i) => ({ name: 'diagonal-' + i, vector })))
+    .concat(intermediates.map((vector, i) => ({ name: 'intermediate-' + i, vector })))
   const movements = bot.pathfinder?.movements
+  const originalCanDig = movements ? movements.canDig : undefined
+  const originalAllow1by1Towers = movements ? movements.allow1by1towers : undefined
+  // Degradation ladder: probe a shorter radius first, then allow 1x1 digging
+  // as a last resort so a thin stone/dirt wall cannot dead-end exploration.
+  const maxProbe = Math.min(6, distance)
+  const radii = [...new Set([maxProbe, Math.min(4, distance), 2.5])]
+  const stages = radii.map(radius => ({ radius, canDig: false }))
+    .concat(radii.map(radius => ({ radius, canDig: true })))
   let best = null
-  for (const candidate of candidates) {
-    const [rawX, rawZ] = candidate.vector
-    const length = Math.hypot(rawX, rawZ) || 1
-    const ux = rawX / length
-    const uz = rawZ / length
-    const localDistance = Math.min(6, distance)
-    const localX = p.x + ux * localDistance
-    const localZ = p.z + uz * localDistance
-    const result = probePathResult(bot, movements, new goals.GoalNearXZ(localX, localZ, 1.25), 80)
-    if (!result || !Array.isArray(result.path)) continue
-    const pathLength = result.path.length
-    if (result.status !== 'success' && pathLength < 2) continue
-    const score = (result.status === 'success' ? 1000 : 0) + pathLength - (candidate.name === preferredDirection ? 0 : 0.25)
-    if (!best || score > best.score) {
-      best = {
-        x: p.x + ux * distance,
-        z: p.z + uz * distance,
-        direction: candidate.name,
-        score
+  try {
+    // Allow 1x1 tower-up during probing so pillar-climbing escape routes are
+    // visible to the pathfinder; restored in finally.
+    if (movements) movements.allow1by1towers = true
+    for (const stage of stages) {
+      if (movements && stage.canDig !== undefined) movements.canDig = stage.canDig
+      for (const candidate of candidates) {
+        const [rawX, rawZ] = candidate.vector
+        const length = Math.hypot(rawX, rawZ) || 1
+        const ux = rawX / length
+        const uz = rawZ / length
+        const localX = p.x + ux * stage.radius
+        const localZ = p.z + uz * stage.radius
+        const result = probePathResult(bot, movements, new goals.GoalNearXZ(localX, localZ, 1.25), 80)
+        if (!result || !Array.isArray(result.path)) continue
+        const pathLength = result.path.length
+        if (result.status !== 'success' && pathLength < 2) continue
+        const score = (result.status === 'success' ? 1000 : 0) + pathLength - (candidate.name === preferredDirection ? 0 : 0.25)
+        if (!best || score > best.score) {
+          // Degraded (shorter) probes return a closer target so the bot makes
+          // incremental progress instead of failing the full distance again.
+          const targetDistance = stage.radius >= maxProbe ? distance : stage.radius
+          best = {
+            x: p.x + ux * targetDistance,
+            z: p.z + uz * targetDistance,
+            direction: candidate.name,
+            score
+          }
+        }
       }
+      if (best) return best
     }
+  } finally {
+    if (movements && originalCanDig !== undefined) movements.canDig = originalCanDig
+    if (movements && originalAllow1by1Towers !== undefined) movements.allow1by1towers = originalAllow1by1Towers
   }
   return best
 }
@@ -2296,19 +2325,38 @@ const handlers = {
     if (!bot.pathfinder) throw new Error('pathfinder 未加载')
     const distance = Math.max(3, Math.min(Number(args.distance ?? 8), 64))
     const dir = String(args.direction || '').toLowerCase()
+    const movements = bot.pathfinder.movements
+    const originalCanDig = movements ? movements.canDig : undefined
+    const originalAllow1by1Towers = movements ? movements.allow1by1towers : undefined
+    const originalMaxDropDown = movements ? movements.maxDropDown : undefined
     let lastReason = '探索失败'
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const target = chooseReachableExploreTarget(bot, distance, attempt === 0 ? dir : '')
-      if (!target) {
-        lastReason = '没有找到可到达的目标'
-        break
+    try {
+      // Allow 1x1 tower-up and deeper drops while explore navigates so the bot
+      // can pillar out of pits or climb short ledges; restored in finally.
+      if (movements) movements.allow1by1towers = true
+      if (movements) movements.maxDropDown = 5
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const target = chooseReachableExploreTarget(bot, distance, attempt === 0 ? dir : '')
+        if (!target) {
+          // No reachable target even after distance/direction/dig degradation:
+          // report a clean failure so the decision loop can switch to mining,
+          // placing or crafting instead of retrying explore forever.
+          return { ok: false, reason: 'no-reachable-explore-target' }
+        }
+        // Allow 1x1 digging only while this explore navigates so a thin
+        // dirt/stone/water wall cannot stall the bot; restored in finally.
+        if (movements) movements.canDig = true
+        const nav = await pathNearXZ(bot, ctx, target.x, target.z, 2, 16000)
+        if (nav && nav.preempted) return nav
+        if (nav && nav.ok) return '已到达 ' + Math.floor(target.x) + ',' + Math.floor(target.z)
+        lastReason = nav && nav.reason ? nav.reason : lastReason
       }
-      const nav = await pathNearXZ(bot, ctx, target.x, target.z, 2, 16000)
-      if (nav && nav.preempted) return nav
-      if (nav && nav.ok) return '已到达 ' + Math.floor(target.x) + ',' + Math.floor(target.z)
-      lastReason = nav && nav.reason ? nav.reason : lastReason
+      return { ok: false, reason: lastReason }
+    } finally {
+      if (movements && originalCanDig !== undefined) movements.canDig = originalCanDig
+      if (movements && originalAllow1by1Towers !== undefined) movements.allow1by1towers = originalAllow1by1Towers
+      if (movements && originalMaxDropDown !== undefined) movements.maxDropDown = originalMaxDropDown
     }
-    throw new Error(lastReason)
   },
 
   attack: async (bot, args) => {

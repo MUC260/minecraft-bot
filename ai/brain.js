@@ -12,6 +12,8 @@ const TERMINAL_BUILD_STEPS = new Set(['buildHouse', 'buildTower', 'buildBridge',
 const MINE_DROP_NAMES = { stone: 'cobblestone', deepslate: 'cobbled_deepslate', grass_block: 'dirt', dirt: 'dirt', gravel: 'gravel', sand: 'sand', obsidian: 'obsidian', flint: 'flint' }
 const RESOURCE_STEPS = new Set(['craftPlanks', 'mineOreVein', 'mineBlock', 'collect'])
 const ADVANCE_ON_SUCCESS_ALWAYS = new Set(['buildNetherPortal', 'findStronghold', 'activateEndPortal', 'fightEnderDragon'])
+const DEFAULT_FREE_GOAL = '自由行动：观察环境，合理互动。'
+const ACTION_FAIL_COOLDOWN_MS = 45000
 
 class Brain {
   constructor (agent, config) {
@@ -40,6 +42,9 @@ class Brain {
     this._planUrgentAction = false
     this._lastSurvivalArmorAt = 0
     this._lastSurvivalAttackAt = 0
+    this._actionFailures = new Map()
+    this._exploreAttempt = 0
+    this._lastTorchPlaceAt = 0
     this.history = []
     this._pendingAssistant = null
     this._followRetryTimer = null
@@ -54,15 +59,22 @@ class Brain {
     this._restoreMemory()
 
     // A fresh process start should not re-announce a stale completed/failed plan
-    // restored from disk; resume in free-play mode instead.
-    if (this.plan && (this.plan.status === 'complete' || this.plan.status === 'failed')) {
-      this.goal = '\u81ea\u7531\u884c\u52a8\uff1a\u89c2\u5bdf\u73af\u5883\uff0c\u5408\u7406\u4e92\u52a8\u3002'
+    // restored from disk; resume in free-play mode instead. An explicit goal
+    // persisted in memory (e.g. “击杀末影龙”) must survive restart, so the
+    // free-play fallback only applies when there is no explicit goal.
+    const memGoal = this.memory && this.memory.data && this.memory.data.goal
+    const hasExplicitGoal = !!memGoal && String(memGoal).trim() !== DEFAULT_FREE_GOAL
+    if (!hasExplicitGoal && this.plan && (this.plan.status === 'complete' || this.plan.status === 'failed')) {
+      this.goal = DEFAULT_FREE_GOAL
       this.plan = this._emptyPlan(this.goal)
       this._completionReported = true
       this._lastPlanKey = ''
       this._repeatStreak = 0
       this._forceVary = false
-      if (this.memory) this.memory.setGoal(this.goal, this.plan)
+      if (this.memory) {
+        this.memory.setGoal(this.goal, this.plan)
+        this.memory.save()
+      }
     }
 
     this._onQueueEmpty = () => {
@@ -71,6 +83,7 @@ class Brain {
     }
     this._onQueueFailure = ({ call, result }) => {
       this._recordBatchEnd()
+      if (call) this._markActionFailed(call.name, call.args)
       if (call && call.name === 'follow' && this.followTarget && !this.holdPosition) {
         this._scheduleRefollow(2000)
       }
@@ -139,7 +152,20 @@ class Brain {
     }
     if (mem.goal && mem.goal !== this.goal) {
       this.goal = mem.goal
-      this.plan = (mem.plan && Array.isArray(mem.plan.steps)) ? mem.plan : this._buildPlan(mem.goal)
+      const restoredPlan = (mem.plan && Array.isArray(mem.plan.steps)) ? mem.plan : null
+      // 重启后显式目标必须继续推进：若旧计划已 complete/failed，为其重建新的运行计划，
+      // 避免重启后回到自由行动或停在空计划。
+      const stale = !!(restoredPlan && (restoredPlan.status === 'complete' || restoredPlan.status === 'failed'))
+      if (restoredPlan && !stale) {
+        this.plan = restoredPlan
+      } else {
+        this.plan = this._buildPlan(mem.goal)
+        if (stale) {
+          this.plan.status = 'running'
+          this.plan.note = '重启后重新开始推进目标。'
+          this.plan.updatedAt = Date.now()
+        }
+      }
     } else if (mem.plan && Array.isArray(mem.plan.steps)) {
       this.plan = mem.plan
     }
@@ -193,7 +219,10 @@ class Brain {
       this.plan = this.config.planAhead === false ? this._emptyPlan(text) : this._buildPlan(text)
       this._pushHistory('user', '【主人新任务】' + text)
       this._pushHistory('user', '【任务拆解】' + JSON.stringify(this.plan))
-      if (this.memory) this.memory.setGoal(this.goal, this.plan)
+      if (this.memory) {
+        this.memory.setGoal(this.goal, this.plan)
+        this.memory.save() // 立即落盘，避免进程重启时 800ms 防抖写入丢失
+      }
       this.agent.emit('aiPlan', { plan: this.plan, at: Date.now() })
     }
     return this.goal
@@ -219,7 +248,10 @@ class Brain {
     this._pendingAssistant = null
     this._completionReported = false
     this._pushHistory('user', '【AI 计划】' + JSON.stringify(this.plan))
-    if (this.memory) this.memory.setGoal(this.goal, this.plan)
+    if (this.memory) {
+      this.memory.setGoal(this.goal, this.plan)
+      this.memory.save() // 立即落盘，避免进程重启时 800ms 防抖写入丢失
+    }
     this.agent.emit('aiPlan', { plan: this.plan, at: Date.now() })
     return steps
   }
@@ -290,7 +322,10 @@ class Brain {
     this._forceVary = false
     this._pendingAssistant = null
     this._pushHistory('user', '【任务取消】回到自由行动')
-    if (this.memory) this.memory.setGoal(this.goal, this.plan)
+    if (this.memory) {
+      this.memory.setGoal(this.goal, this.plan)
+      this.memory.save()
+    }
     this.agent.emit('aiPlan', { plan: this.plan, at: Date.now() })
   }
 
@@ -468,8 +503,12 @@ class Brain {
     let plan = Array.isArray(actions)
       ? actions.filter(a => a && TOOL_NAMES.has(a.name)).map(a => ({ name: a.name, args: a.args || {} }))
       : []
-    if (!plan.length) plan = [{ name: 'explore', args: {} }]
-    if (plan.length === 1 && plan[0].name === 'wait' && this._repeatStreak >= 2) {
+    if (!plan.length) {
+      const fallback = this._fallbackActions(snapshot)
+      plan = (fallback && fallback.length) ? fallback : [{ name: 'explore', args: {} }]
+    }
+    const isCooldownWait = plan.length === 1 && plan[0].name === 'wait' && Number((plan[0].args && plan[0].args.ms) || 0) >= 10000
+    if (!isCooldownWait && plan.length === 1 && plan[0].name === 'wait' && this._repeatStreak >= 2) {
       plan = [{ name: 'explore', args: {} }]
     }
 
@@ -523,6 +562,7 @@ class Brain {
       reason
     }))
     if (this.memory) this.memory.recordActionResult(name, ok, reason)
+    if (!ok) this._markActionFailed(call.name, call.args)
   }
 
   _recordBatchEnd () {
@@ -1060,6 +1100,88 @@ class Brain {
     return logInBag || countPlanks >= 3 || treeNearby
   }
 
+  // ── 失败退避/去重：同一 action+params 近期失败过的不原样重试 ──────────
+  _actionKey (name, args = {}) {
+    try {
+      return JSON.stringify([String(name || ''), args || {}])
+    } catch {
+      return String(name || '')
+    }
+  }
+
+  _markActionFailed (name, args) {
+    if (!name) return
+    const key = this._actionKey(name, args)
+    const now = Date.now()
+    const prev = this._actionFailures.get(key)
+    this._actionFailures.set(key, { at: now, count: (prev ? prev.count : 0) + 1 })
+    if (this._actionFailures.size > 64) {
+      for (const [k, v] of this._actionFailures) {
+        if (now - v.at > ACTION_FAIL_COOLDOWN_MS * 4) this._actionFailures.delete(k)
+      }
+    }
+  }
+
+  _isActionBlocked (name, args) {
+    const f = this._actionFailures.get(this._actionKey(name, args))
+    return !!(f && (Date.now() - f.at) < ACTION_FAIL_COOLDOWN_MS)
+  }
+
+  // 全部候选都被退避挡住时，换成有产出的候选动作；最后才 explore 且改变参数。
+  _fallbackActions (snapshot) {
+    const state = snapshot || {}
+    const drops = Array.isArray(state.nearbyDrops) ? state.nearbyDrops : []
+    if (drops.length) return [{ name: 'collect', args: { radius: 8 } }]
+
+    const targets = Array.isArray(state.nearbyTargets) ? state.nearbyTargets : []
+    for (const t of targets) {
+      const n = String(t && t.name || '').toLowerCase()
+      if (n.endsWith('_log') || n.endsWith('_stem') || n === 'mushroom_stem') {
+        return [{ name: 'chopTree', args: { radius: 12 } }]
+      }
+      if (n.includes('_ore') || n === 'ancient_debris') {
+        return [{ name: 'mineOreVein', args: { radius: 12 } }]
+      }
+    }
+
+    if (this._shouldCraftGear(state)) return [{ name: 'craftGear', args: {} }]
+
+    const items = (state.inventory && Array.isArray(state.inventory.items)) ? state.inventory.items : []
+    const hasTorch = items.some(i => String(i && i.name || '').toLowerCase() === 'torch' && Number(i.count || 0) > 0)
+    const now = Date.now()
+    if (hasTorch && now - this._lastTorchPlaceAt >= 60000) {
+      this._lastTorchPlaceAt = now
+      return [{ name: 'equip', args: { name: 'torch' } }, { name: 'use', args: {} }]
+    }
+
+    // explore 已连续失败时先等待冷却，避免反复触发寻路超时
+    let exploreFails = 0
+    for (const [key, f] of this._actionFailures) {
+      if (key.startsWith('["explore"') && f && (now - f.at) < ACTION_FAIL_COOLDOWN_MS) {
+        exploreFails += Number(f.count) || 1
+      }
+    }
+    if (exploreFails >= 3) return [{ name: 'wait', args: { ms: 15000 } }]
+
+    this._exploreAttempt++
+    const distance = 6 + ((this._exploreAttempt * 3) % 13)
+    const directions = ['north', 'south', 'east', 'west']
+    return [{ name: 'explore', args: { distance, direction: directions[this._exploreAttempt % 4] } }]
+  }
+
+  _avoidRecentFailures (actions, snapshot) {
+    const list = (Array.isArray(actions) ? actions : []).filter(a => a && a.name && TOOL_NAMES.has(a.name))
+    if (!list.length) return list
+    const kept = list.filter(a => !this._isActionBlocked(a.name, a.args))
+    if (kept.length) return kept
+    const fallback = this._fallbackActions(snapshot)
+    if (fallback && fallback.length) {
+      this.agent.emit('log', { level: 'warn', message: `动作 ${list.map(a => a.name).join('+')} 近期失败，本轮改用候选动作 ${fallback.map(a => a.name).join('+')}` })
+      return fallback
+    }
+    return list
+  }
+
   _offlineActions (snapshot) {
     this._offlineStep++
     const state = snapshot || {}
@@ -1200,7 +1322,7 @@ class Brain {
     if (!this._hasValidApiKey()) {
       const snapshot = this.agent.snapshot()
       this._autoCompletePrepSteps(snapshot)
-      this._dispatchPlan(this._offlineActions(snapshot), snapshot)
+      this._dispatchPlan(this._avoidRecentFailures(this._offlineActions(snapshot), snapshot), snapshot)
       this._scheduleNext()
       return
     }
@@ -1213,10 +1335,18 @@ class Brain {
       // 生存优先级：先保命/补给，再交给 AI 决策
       const urgent = this._survivalPriority(snapshot)
       if (urgent) {
-        this._planUrgentAction = true
-        this._dispatchPlan(urgent, snapshot)
-        this._scheduleNext()
-        return
+        // 生存 explore 近期失败（如寻路超时）时，本轮放弃生存探索并放行主计划，
+        // 避免生存分支反复用同一 explore 抢占主计划（eat/hunt/attack 等救命动作不受影响）
+        const primary = urgent[0]
+        if (primary && primary.name === 'explore' && this._isActionBlocked('explore', primary.args)) {
+          this._planUrgentAction = false
+          this.agent.emit('log', { level: 'warn', message: 'survival: explore 近期失败，本轮跳过让主计划推进' })
+        } else {
+          this._planUrgentAction = true
+          this._dispatchPlan(this._avoidRecentFailures(urgent, snapshot), snapshot)
+          this._scheduleNext()
+          return
+        }
       }
 
       // 有明确计划链时确定性推进，替代每轮都交给 LLM 自由决策
@@ -1241,7 +1371,7 @@ class Brain {
       if (!actions.length) actions = [{ name: 'explore', args: {} }]
       this.aiErrorStreak = 0
       this.aiBackoffMs = 0
-      this._dispatchPlan(actions, snapshot)
+      this._dispatchPlan(this._avoidRecentFailures(actions, snapshot), snapshot)
     } catch (e) {
       this.lastError = e.message
       this.aiErrorStreak++
@@ -1250,7 +1380,7 @@ class Brain {
       this.agent.emit('log', { level: 'warn', message: `AI 决策失败，${Math.ceil(backoffMs / 1000)} 秒后重试: ${e.message}` })
       if (this.aiErrorStreak >= 3 && !this.holdPosition && !this.followTarget) {
         const snapshot = this.agent.snapshot()
-        this._dispatchPlan(this._offlineActions(snapshot), snapshot)
+        this._dispatchPlan(this._avoidRecentFailures(this._offlineActions(snapshot), snapshot), snapshot)
       }
     } finally {
       this.ticking = false
