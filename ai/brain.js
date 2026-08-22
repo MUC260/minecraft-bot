@@ -10,6 +10,8 @@ const MAX_HISTORY_CHARS = 16000
 const SURVIVAL_COOLDOWN_MS = 4000
 const TERMINAL_BUILD_STEPS = new Set(['buildHouse', 'buildTower', 'buildBridge', 'buildWall', 'buildShelter'])
 const MINE_DROP_NAMES = { stone: 'cobblestone', deepslate: 'cobbled_deepslate', grass_block: 'dirt', dirt: 'dirt', gravel: 'gravel', sand: 'sand', obsidian: 'obsidian', flint: 'flint' }
+const RESOURCE_STEPS = new Set(['craftPlanks', 'mineOreVein', 'mineBlock', 'collect'])
+const ADVANCE_ON_SUCCESS_ALWAYS = new Set(['buildNetherPortal', 'findStronghold', 'activateEndPortal', 'fightEnderDragon'])
 
 class Brain {
   constructor (agent, config) {
@@ -31,7 +33,11 @@ class Brain {
     this.aiErrorStreak = 0
     this.aiBackoffMs = 0
     this._offlineStep = 0
+    this._planRecoveryCount = 0
+    this._planRecoveryExplore = false
+    this._planForceExplore = false
     this._lastSurvivalEatAt = 0
+    this._planUrgentAction = false
     this._lastSurvivalArmorAt = 0
     this._lastSurvivalAttackAt = 0
     this.history = []
@@ -425,6 +431,38 @@ class Brain {
     return undefined
   }
 
+  // 结构化计划确定性推进：有运行中的计划步骤时，直接按步骤建议工具执行，
+  // 不再依赖 LLM 自主选择（避免 LLM 因附近怪物而反复攻击、偏离长目标链）。
+  _planAction (snapshot) {
+    const plan = this.plan
+    if (!plan || !Array.isArray(plan.steps) || plan.steps.length === 0) return null
+    if (plan.status !== 'running') return null
+    const idx = Math.min(plan.activeStep || 0, plan.steps.length - 1)
+    const step = plan.steps[idx]
+    if (!step || step.done) return null
+    if (this._stepReady(step, snapshot || {})) return null
+    const name = String(step.name || '')
+    if (!TOOL_NAMES.has(name)) return null
+
+    if (this._planForceExplore) {
+      this._planForceExplore = false
+      return [{ name: 'explore', args: { distance: 48 } }]
+    }
+
+    // Resource steps that keep failing (no tree/ore/material nearby) alternate
+    // with explore so the bot relocates instead of retrying the same failing step.
+    if (RESOURCE_STEPS.has(name) && Number(step.failures || 0) >= 1) {
+      this._planRecoveryCount += 1
+      if (this._planRecoveryCount % 2 === 1) {
+        this._planRecoveryExplore = true
+        const distance = Math.min(48, 10 + Math.min(Math.max(Number(step.failures || 0) - 1, 0), 6) * 6)
+        return [{ name: 'explore', args: { distance } }]
+      }
+    }
+    this._planRecoveryExplore = false
+    return [{ name, args: step.args || {} }]
+  }
+
   _dispatchPlan (actions, snapshot) {
     this._persistSnapshot(snapshot)
     let plan = Array.isArray(actions)
@@ -722,11 +760,22 @@ class Brain {
       case 'craftPlanks': {
         let n = 0
         for (const s of ['oak_planks', 'birch_planks', 'spruce_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'crimson_planks', 'warped_planks', 'cherry_planks', 'bamboo_planks']) n += count(s)
-        return n >= 16
+        const hasTool = hasAnySuffix('_pickaxe') || hasAnySuffix('_axe')
+        return n >= 8 || (n >= 4 && hasTool)
       }
       case 'craft': {
         const target = String(args.name || args.item || '').toLowerCase()
-        if (target === 'crafting_table') return has('crafting_table')
+        if (target === 'crafting_table') {
+          if (has('crafting_table')) return true
+          const bot = this.agent && this.agent.bot
+          if (bot && typeof bot.findBlocks === 'function') {
+            try {
+              const found = bot.findBlocks({ matching: (b) => { try { return String(b && b.name).toLowerCase() === 'crafting_table' } catch { return false } }, maxDistance: 8, count: 1 })
+              return Array.isArray(found) && found.length > 0
+            } catch { return false }
+          }
+          return false
+        }
         if (target) return has(target)
         return false
       }
@@ -734,14 +783,18 @@ class Brain {
       case 'mineOreVein': {
         const ore = String(args.name || '').toLowerCase()
         const need = Number(args.targetCount || args.count) || 1
-        const drop = {
-          iron_ore: 'raw_iron', gold_ore: 'raw_gold', copper_ore: 'raw_copper',
-          coal_ore: 'coal', diamond_ore: 'diamond', redstone_ore: 'redstone',
-          lapis_ore: 'lapis_lazuli', emerald_ore: 'emerald', nether_quartz_ore: 'quartz'
+        const alts = {
+          iron_ore: ['raw_iron', 'iron_ingot', 'iron_ore', 'deepslate_iron_ore'],
+          gold_ore: ['raw_gold', 'gold_ingot', 'gold_ore', 'deepslate_gold_ore'],
+          copper_ore: ['raw_copper', 'copper_ingot', 'copper_ore', 'deepslate_copper_ore'],
+          coal_ore: ['coal', 'coal_ore', 'deepslate_coal_ore'],
+          diamond_ore: ['diamond', 'diamond_ore', 'deepslate_diamond_ore'],
+          redstone_ore: ['redstone', 'redstone_ore', 'deepslate_redstone_ore'],
+          lapis_ore: ['lapis_lazuli', 'lapis_ore', 'deepslate_lapis_ore'],
+          emerald_ore: ['emerald', 'emerald_ore', 'deepslate_emerald_ore'],
+          nether_quartz_ore: ['quartz', 'nether_quartz_ore']
         }[ore]
-        if (drop) return count(drop) >= need
-        if (ore === 'iron_ore' && count('iron_ingot') >= need) return true
-        if (ore === 'gold_ore' && count('gold_ingot') >= need) return true
+        if (alts) return alts.reduce((sum, n) => sum + count(n), 0) >= need
         return false
       }
       case 'mineBlock': {
@@ -831,16 +884,41 @@ class Brain {
     const step = plan.steps[idx]
     if (!step) return
 
+    // Recovery explore (relocating after a resource step failure) does not count
+    // against the current step's failure counter.
+    if (call && call.name === 'explore' && this._planRecoveryExplore) {
+      this._planRecoveryExplore = false
+      return false
+    }
+
+    // Survival/urgent actions do not count against the current plan step.
+    if (call && this._planUrgentAction) {
+      this._planUrgentAction = false
+      return false
+    }
+
     // 失败也要记录：step.failures 累计失败次数，连续失败超过阈值则自动跳过换方案，
     // 避免任务永远卡在同一动作上。
     if (!result || !result.ok) {
       step.failures = Number(step.failures || 0) + 1
       step.lastFailReason = (result && result.reason) || (call ? ('动作 ' + call.name + ' 执行失败') : '执行失败')
       step.updatedAt = Date.now()
-      const failLimit = Number(this.config.stepFailLimit) || 2
+      const failLimit = Number(this.config.stepFailLimit) || 5
       if (step.failures >= failLimit) {
         if (TERMINAL_BUILD_STEPS.has(step.name)) {
-          logger.warn(`步骤 ${step.name} 连续失败，回退到准备材料步骤，不标记任务完成: ${step.lastFailReason}`)
+          if (RESOURCE_STEPS.has(step.name)) {
+          logger.warn('resource step ' + step.name + ' failed ' + step.failures + 'x, force far explore instead of skipping: ' + step.lastFailReason)
+          this.agent.emit('log', { level: 'warn', message: 'resource step ' + step.name + ' failed repeatedly, exploring far away then retrying' })
+          step.failures = 0
+          step.lastFailReason = (result && result.reason) || 'exec failed'
+          step.updatedAt = Date.now()
+          plan.updatedAt = Date.now()
+          this._planForceExplore = true
+          if (this.memory) this.memory.setPlan(plan)
+          this.agent.emit('aiPlan', { plan, at: Date.now() })
+          return true
+        }
+        logger.warn(`步骤 ${step.name} 连续失败，回退到准备材料步骤，不标记任务完成: ${step.lastFailReason}`)
           this.agent.emit('log', { level: 'warn', message: `步骤 ${step.name} 连续失败，回退到准备材料步骤，继续准备建材` })
           step.failures = 0
           step.lastFailReason = (result && result.reason) || '执行失败'
@@ -919,6 +997,13 @@ class Brain {
     }
     const targetStep = plan.steps[target]
     if (targetStep && !targetStep.done) {
+      const ready = ADVANCE_ON_SUCCESS_ALWAYS.has(targetStep.name) || this._stepReady(targetStep, this.agent.snapshot())
+      if (!ready) {
+        plan.updatedAt = Date.now()
+        if (this.memory) this.memory.setPlan(plan)
+        this.agent.emit('aiPlan', { plan, at: Date.now() })
+        return false
+      }
       targetStep.done = true
       targetStep.note = (targetStep.note || '') + '已执行'
       targetStep.failures = 0
@@ -980,7 +1065,7 @@ class Brain {
     const state = snapshot || {}
     const bot = state.bot || {}
     const food = Number(bot.food)
-    if (Number.isFinite(food) && food < 10) return [{ name: 'eat', args: {} }]
+    if (Number.isFinite(food) && food < 10 && this._hasEdibleFood(state)) return [{ name: 'eat', args: {} }]
 
     const hostiles = Array.isArray(state.nearbyHostiles) ? state.nearbyHostiles : []
     if (hostiles.length && this._offlineStep % 4 === 0) return [{ name: 'armor', args: {} }]
@@ -1021,6 +1106,24 @@ class Brain {
 
   // 生存优先级：低血/低食/无装备时强制补给，避免 AI 在危险状态下自由行动。
   // 返回动作数组或 null（无紧急需求）。
+  _hasEdibleFood (state) {
+    const items = (state && state.inventory && Array.isArray(state.inventory.items)) ? state.inventory.items : []
+    const food = ['apple', 'golden_apple', 'bread', 'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton', 'cooked_rabbit', 'cooked_cod', 'cooked_salmon', 'baked_potato', 'carrot', 'melon_slice', 'sweet_berries', 'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon']
+    return items.some(i => food.includes(String(i && i.name || '').toLowerCase()))
+  }
+
+  _nearestFoodAnimal (state) {
+    const entities = (state && Array.isArray(state.entities)) ? state.entities : []
+    const land = ['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom']
+    const water = ['salmon', 'cod']
+    const byDist = (a, b) => (Number(a.distance) || 999) - (Number(b.distance) || 999)
+    const landCandidates = entities.filter(e => e && !e.hostile && land.includes(String(e.name || '').toLowerCase())).sort(byDist)
+    if (landCandidates.length) return String(landCandidates[0].name)
+    const waterCandidates = entities.filter(e => e && !e.hostile && water.includes(String(e.name || '').toLowerCase()) && (Number(e.distance) || 999) <= 6).sort(byDist)
+    if (waterCandidates.length) return String(waterCandidates[0].name)
+    return null
+  }
+
   _survivalPriority (snapshot) {
     const state = snapshot || {}
     const bot = state.bot || {}
@@ -1032,13 +1135,16 @@ class Brain {
     if ((Number.isFinite(health) && health < 6) || (Number.isFinite(food) && food < 6)) {
       if (now - this._lastSurvivalEatAt >= SURVIVAL_COOLDOWN_MS) {
         this._lastSurvivalEatAt = now
-        this.agent.emit('log', { level: 'warn', message: `??/????? (health=${health}, food=${food})?????` })
-        return [{ name: 'eat', args: {} }]
+        this.agent.emit('log', { level: 'warn', message: `survival: low health/hunger (health=${health}, food=${food}), refuel` })
+        if (this._hasEdibleFood(state)) return [{ name: 'eat', args: {} }]
+        const foodAnimal = this._nearestFoodAnimal(state)
+        if (foodAnimal) return [{ name: 'hunt', args: { name: foodAnimal } }]
+        return [{ name: 'explore', args: { distance: 12 } }]
       }
       return null
     }
 
-    // ??????????????/????????????????? LLM
+    // no melee weapon and hostiles nearby -> craft/equip gear
     const hostiles = Array.isArray(state.nearbyHostiles) ? state.nearbyHostiles : []
     const inventory = state.inventory
     const items = (inventory && Array.isArray(inventory.items)) ? inventory.items : []
@@ -1107,7 +1213,16 @@ class Brain {
       // 生存优先级：先保命/补给，再交给 AI 决策
       const urgent = this._survivalPriority(snapshot)
       if (urgent) {
+        this._planUrgentAction = true
         this._dispatchPlan(urgent, snapshot)
+        this._scheduleNext()
+        return
+      }
+
+      // 有明确计划链时确定性推进，替代每轮都交给 LLM 自由决策
+      const planAction = this._planAction(snapshot)
+      if (planAction) {
+        this._dispatchPlan(planAction, snapshot)
         this._scheduleNext()
         return
       }

@@ -823,7 +823,7 @@ async function placeSpecificBlockNearby (bot, ctx, itemName) {
   const yaw = Number(bot.entity.yaw) || 0
   const dx = -Math.round(Math.sin(yaw))
   const dz = -Math.round(Math.cos(yaw))
-  const offsets = [[dx, 0, dz], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [-dx, 0, -dz]]
+  const offsets = [[dx, 0, dz], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [-dx, 0, -dz], [1, 0, 1], [1, 0, -1], [-1, 0, 1], [-1, 0, -1]]
   for (const [ox, oy, oz] of offsets) {
     const pos = new Vec3(Math.floor(here.x) + ox, y + oy, Math.floor(here.z) + oz)
     let block = bot.blockAt(pos)
@@ -1151,7 +1151,7 @@ async function chopOneTree (bot, ctx, maxBlocks = 48, radius = 16) {
 
 async function exploreForBuildResources (bot, ctx, attempts = 3) {
   for (let i = 0; i < attempts; i++) {
-    const distance = 10 + Math.floor(Math.random() * 8)
+    const distance = 18 + Math.floor(Math.random() * 22)
     const angle = Math.random() * Math.PI * 2
     const x = bot.entity.position.x + Math.sin(angle) * distance
     const z = bot.entity.position.z + Math.cos(angle) * distance
@@ -1173,7 +1173,7 @@ async function gatherAndCraftPlanks (bot, material, ctx, need) {
       } catch (err) {
         if (err && (err.code === 'ABORT_ERR' || ctx?.signal?.aborted)) throw err
         if (attempt >= 3 || !(err && (err.code === 'NO_TREE' || String(err.message || '').includes('附近没有可砍')))) throw err
-        const moved = await exploreForBuildResources(bot, ctx, 2)
+        const moved = await exploreForBuildResources(bot, ctx, 6)
         if (moved && moved.preempted) return moved
         continue
       }
@@ -1265,6 +1265,59 @@ async function digConnected (bot, start, predicate, ctx, limit = 64, options = {
   }
 
   return { dug, preempted: false }
+}
+
+async function digDownForOreSearch (bot, ctx, maxSteps = 6) {
+  const here = bot.entity.position
+  const x = Math.floor(here.x)
+  const z = Math.floor(here.z)
+  const topY = Math.floor(here.y)
+  const steps = Math.max(2, Math.min(6, Number.isFinite(maxSteps) ? Math.floor(maxSteps) : 6))
+  let dug = 0
+  for (let i = 0; i < steps; i++) {
+    throwIfAborted(ctx)
+    const digY = topY - 1 - i
+    const digBlock = bot.blockAt(new Vec3(x, digY, z))
+    if (!digBlock) break
+    const name = lowerBlockName(digBlock)
+    if (digBlock.boundingBox === 'empty' || name === 'lava' || name === 'water' || name.endsWith('_lava') || name.endsWith('_water')) break
+    if (digBlock.diggable === false || name === 'bedrock') break
+    // The block the bot would land on must also be solid and hazard-free so it
+    // never falls into an open cave, lava pool or water pocket.
+    const landing = bot.blockAt(new Vec3(x, digY - 1, z))
+    if (!landing) break
+    const landingName = lowerBlockName(landing)
+    if (landing.boundingBox === 'empty' || landingName === 'lava' || landingName === 'water' || landingName.endsWith('_lava') || landingName.endsWith('_water') || landingName === 'bedrock') break
+    try { await combat.equipBestToolForBlock(bot, digBlock.name) } catch {}
+    await raceWithAbort(bot.dig(digBlock, true), ctx, () => {
+      if (typeof bot.stopDigging === 'function') bot.stopDigging()
+    })
+    dug++
+    await sleep(150, ctx)
+  }
+  return { dug, preempted: false }
+}
+
+function isDeepOreName (name) {
+  const n = canonicalOreName(name)
+  return ['iron_ore', 'gold_ore', 'diamond_ore', 'redstone_ore', 'lapis_ore', 'emerald_ore', 'copper_ore', 'ancient_debris', 'nether_quartz_ore', 'nether_gold_ore'].includes(n)
+}
+
+async function descendForDeepOre (bot, predicate, ctx, targetY = 16, maxRounds = 14) {
+  const hardFloor = Math.max(1, Math.min(32, Number.isFinite(targetY) ? Math.floor(targetY) : 16))
+  let rounds = 0
+  while (rounds < maxRounds) {
+    throwIfAborted(ctx)
+    rounds++
+    const block = findNearestBlockBy(bot, predicate, 24, 256)
+    if (block) return { found: block, preempted: false }
+    if (Math.floor(bot.entity.position.y) <= hardFloor) break
+    const down = await digDownForOreSearch(bot, ctx, 4)
+    if (down && down.preempted) return { found: null, preempted: true, reason: down.reason || 'reactive preempt' }
+    if (!down || down.dug === 0) break
+  }
+  const final = findNearestBlockBy(bot, predicate, 24, 256)
+  return { found: final || null, preempted: false }
 }
 
 async function equipBuildBlock (bot, item) {
@@ -2147,10 +2200,12 @@ async function ignitePortal (bot, ctx, framePositions) {
   let igniter = findInventoryItemByName(bot, 'flint_and_steel')
   if (!igniter) igniter = findInventoryItemByName(bot, 'fire_charge')
   if (!igniter) return false
-  const frame = framePositions.find(p => {
+  const framePos = framePositions.find(p => {
     const b = bot.blockAt(p)
     return b && b.name && String(b.name).toLowerCase() === 'obsidian'
   }) || framePositions[0]
+  if (!framePos) return false
+  const frame = bot.blockAt(framePos)
   if (!frame) return false
   try { await bot.equip(igniter, 'hand') } catch { return false }
   try { await bot.lookAt(frame.position.offset(0.5, 0.5, 0.5), true) } catch {}
@@ -2239,7 +2294,7 @@ const handlers = {
 
   explore: async (bot, args, ctx) => {
     if (!bot.pathfinder) throw new Error('pathfinder 未加载')
-    const distance = Math.max(3, Math.min(Number(args.distance ?? 8), 24))
+    const distance = Math.max(3, Math.min(Number(args.distance ?? 8), 64))
     const dir = String(args.direction || '').toLowerCase()
     let lastReason = '探索失败'
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -2548,23 +2603,45 @@ const handlers = {
       throwIfAborted(ctx)
       if (targetCount && name && oreYieldCount(bot, name) - beforeYield >= targetCount) break
 
-      const block = findNearestBlockBy(bot, predicate, radius, 256)
+      let block = findNearestBlockBy(bot, predicate, Math.min(32, radius + searchesWithoutOre * 2), 256)
       if (!block) {
-        if (!targetCount || searchesWithoutOre >= 2) break
+        if (!targetCount || searchesWithoutOre >= 12) break
         searchesWithoutOre++
-        const angle = Math.random() * Math.PI * 2
-        const distance = 5 + searchesWithoutOre * 3
-        const nav = await pathNearXZ(
-          bot,
-          ctx,
-          bot.entity.position.x + Math.sin(angle) * distance,
-          bot.entity.position.z + Math.cos(angle) * distance,
-          2,
-          45000
-        )
-        if (nav && nav.preempted) return nav
-        if (nav && !nav.ok) continue
-        continue
+        if (isDeepOreName(name)) {
+          const down = await descendForDeepOre(bot, predicate, ctx, 16, 14)
+          if (down && down.preempted) return down
+          if (down && down.found) {
+            block = down.found
+            searchesWithoutOre = 0
+          } else {
+            const angle = Math.random() * Math.PI * 2
+            const distance = 6 + searchesWithoutOre * 3
+            const nav = await pathNearXZ(
+              bot,
+              ctx,
+              bot.entity.position.x + Math.sin(angle) * distance,
+              bot.entity.position.z + Math.cos(angle) * distance,
+              2,
+              45000
+            )
+            if (nav && nav.preempted) return nav
+            continue
+          }
+        } else {
+          const angle = Math.random() * Math.PI * 2
+          const distance = 6 + searchesWithoutOre * 4
+          const nav = await pathNearXZ(
+            bot,
+            ctx,
+            bot.entity.position.x + Math.sin(angle) * distance,
+            bot.entity.position.z + Math.cos(angle) * distance,
+            2,
+            45000
+          )
+          if (nav && nav.preempted) return nav
+          if (nav && !nav.ok) continue
+          continue
+        }
       }
 
       searchesWithoutOre = 0
@@ -3035,7 +3112,7 @@ const handlers = {
     }
     if (placed < 10) throw new Error('portal frame incomplete: ' + placed + '/10')
     const ignited = await ignitePortal(bot, ctx, positions)
-    if (!ignited) return 'nether portal frame built (' + placed + ' obsidian) but not lit; need flint_and_steel or fire_charge'
+    if (!ignited) throw new Error('nether portal frame built but failed to light it')
     return 'nether portal built and lit (' + placed + ' obsidian)'
   },
 
@@ -3045,17 +3122,22 @@ const handlers = {
       return n === 'nether_portal' || n === 'end_portal' || n === 'end_gateway'
     }, 12, 24)
     if (!portal) throw new Error('no portal block nearby')
-    const nav = await pathNear(bot, ctx, portal.position.x, portal.position.y, portal.position.z, 1.5, 30000)
+    const nav = await pathNear(bot, ctx, portal.position.x, portal.position.y, portal.position.z, 0.6, 30000)
     if (nav && nav.preempted) return nav
     if (nav && !nav.ok) throw new Error(nav.reason || 'cannot reach portal')
     const startDim = dimName(bot)
+    bot.setControlState('forward', true)
     const deadline = Date.now() + 20000
-    while (Date.now() < deadline) {
-      throwIfAborted(ctx)
-      if (dimName(bot) !== startDim) return 'entered ' + dimName(bot)
-      await sleep(400, ctx)
+    try {
+      while (Date.now() < deadline) {
+        throwIfAborted(ctx)
+        if (dimName(bot) !== startDim) return 'entered ' + dimName(bot)
+        await sleep(300, ctx)
+      }
+    } finally {
+      bot.setControlState('forward', false)
     }
-    return 'stood in portal; dimension change pending'
+    throw new Error('portal dimension change timeout (still ' + startDim + ')')
   },
 
   obtainBlazeRods: async (bot, args, ctx) => {
@@ -3100,7 +3182,7 @@ const handlers = {
       }
     }
     if (lastDir) return 'followed ender eyes toward stronghold; now near ' + Math.floor(bot.entity.position.x) + ',' + Math.floor(bot.entity.position.z)
-    return 'threw ender eyes but could not track direction; search area near ' + Math.floor(bot.entity.position.x) + ',' + Math.floor(bot.entity.position.z)
+    throw new Error('could not track ender eye direction')
   },
 
   activateEndPortal: async (bot, args, ctx) => {
@@ -3125,7 +3207,7 @@ const handlers = {
     }
     const portal = findNearestBlockBy(bot, b => lowerBlockName(b) === 'end_portal', 24, 32)
     if (portal) return 'end portal activated (' + placed + ' eyes placed)'
-    return 'placed ' + placed + ' ender eyes; portal activation pending'
+    throw new Error('end portal not activated after placing ' + placed + ' eyes')
   },
 
   fightEnderDragon: async (bot, args, ctx) => {
@@ -3159,7 +3241,7 @@ const handlers = {
     }
     const dragon = bot.nearestEntity(e => e && e.name === 'ender_dragon')
     if (!dragon) return 'ender dragon defeated'
-    return 'dragon fight engaged'
+    throw new Error('ender dragon still alive after fight window')
   },
 
   plan: async (bot, args) => {

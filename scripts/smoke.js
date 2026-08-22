@@ -125,11 +125,18 @@ function mockBotForReactive () {
   const executor = new EventEmitter()
   const agent = { executor, connected: true, snapshot () { return {} }, emit () {} }
   const brain = new Brain(agent, { intervalMs: 1500, apiKey: 'sk-valid' })
-  const lowHealth = brain._survivalPriority({ bot: { health: 3, food: 20 }, nearbyHostiles: [], inventory: { items: [] } })
-  assert.strictEqual(lowHealth[0].name, 'eat', 'low health should force eat')
+  const withFood = { bot: { health: 3, food: 20 }, nearbyHostiles: [], entities: [], inventory: { items: [{ name: 'cooked_beef', count: 3 }] } }
+  const lowHealth = brain._survivalPriority(withFood)
+  assert.strictEqual(lowHealth[0].name, 'eat', 'low health with food should force eat')
   brain._lastSurvivalEatAt = 0
-  const lowFood = brain._survivalPriority({ bot: { health: 20, food: 4 }, nearbyHostiles: [], inventory: { items: [] } })
-  assert.strictEqual(lowFood[0].name, 'eat', 'low food should force eat')
+  const lowFood = brain._survivalPriority({ bot: { health: 20, food: 4 }, nearbyHostiles: [], entities: [], inventory: { items: [{ name: 'bread', count: 2 }] } })
+  assert.strictEqual(lowFood[0].name, 'eat', 'low food with food should force eat')
+  brain._lastSurvivalEatAt = 0
+  const hungryNoFood = brain._survivalPriority({ bot: { health: 20, food: 4 }, nearbyHostiles: [], entities: [], inventory: { items: [] } })
+  assert.strictEqual(hungryNoFood[0].name, 'explore', 'low food without food should explore')
+  brain._lastSurvivalEatAt = 0
+  const hungryAnimal = brain._survivalPriority({ bot: { health: 20, food: 4 }, nearbyHostiles: [], entities: [{ name: 'cow', hostile: false, distance: 5 }], inventory: { items: [] } })
+  assert.strictEqual(hungryAnimal[0].name, 'hunt', 'low food with animal should hunt')
   const normal = brain._survivalPriority({ bot: { health: 20, food: 20 }, nearbyHostiles: [], inventory: { items: [{ name: 'iron_sword', count: 1 }] } })
   assert.strictEqual(normal, null, 'healthy bot should have no urgent action')
   brain.destroy()
