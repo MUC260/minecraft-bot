@@ -14,6 +14,19 @@ const RESOURCE_STEPS = new Set(['craftPlanks', 'mineOreVein', 'mineBlock', 'coll
 const ADVANCE_ON_SUCCESS_ALWAYS = new Set(['buildNetherPortal', 'findStronghold', 'activateEndPortal', 'fightEnderDragon'])
 const DEFAULT_FREE_GOAL = '自由行动：观察环境，合理互动。'
 const ACTION_FAIL_COOLDOWN_MS = 45000
+const EDIBLE_FOOD = new Set([
+  'apple', 'golden_apple', 'enchanted_golden_apple', 'bread',
+  'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton',
+  'cooked_rabbit', 'cooked_cod', 'cooked_salmon',
+  'baked_potato', 'potato', 'carrot', 'golden_carrot', 'melon_slice',
+  'sweet_berries', 'glow_berries',
+  'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon', 'tropical_fish',
+  'cookie', 'pumpkin_pie', 'beetroot', 'beetroot_soup', 'mushroom_stew',
+  'rabbit_stew', 'suspicious_stew', 'dried_kelp', 'honey_bottle'
+])
+const FOOD_ANIMALS_LAND = new Set(['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom', 'fox'])
+const FOOD_ANIMALS_WATER = new Set(['salmon', 'cod', 'tropical_fish'])
+const FOOD_TARGET_BLOCKS = new Set(['sweet_berry_bush', 'pumpkin', 'melon', 'wheat', 'carrots', 'potatoes', 'beetroots', 'cocoa'])
 
 class Brain {
   constructor (agent, config) {
@@ -1136,6 +1149,9 @@ class Brain {
     const targets = Array.isArray(state.nearbyTargets) ? state.nearbyTargets : []
     for (const t of targets) {
       const n = String(t && t.name || '').toLowerCase()
+      if (n === 'sweet_berry_bush' || FOOD_TARGET_BLOCKS.has(n)) {
+        return [{ name: 'collect', args: { radius: 8 } }]
+      }
       if (n.endsWith('_log') || n.endsWith('_stem') || n === 'mushroom_stem') {
         return [{ name: 'chopTree', args: { radius: 12 } }]
       }
@@ -1230,19 +1246,33 @@ class Brain {
   // 返回动作数组或 null（无紧急需求）。
   _hasEdibleFood (state) {
     const items = (state && state.inventory && Array.isArray(state.inventory.items)) ? state.inventory.items : []
-    const food = ['apple', 'golden_apple', 'bread', 'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton', 'cooked_rabbit', 'cooked_cod', 'cooked_salmon', 'baked_potato', 'carrot', 'melon_slice', 'sweet_berries', 'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon']
-    return items.some(i => food.includes(String(i && i.name || '').toLowerCase()))
+    return items.some(i => EDIBLE_FOOD.has(String(i && i.name || '').toLowerCase()))
   }
 
   _nearestFoodAnimal (state) {
     const entities = (state && Array.isArray(state.entities)) ? state.entities : []
-    const land = ['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom']
-    const water = ['salmon', 'cod']
     const byDist = (a, b) => (Number(a.distance) || 999) - (Number(b.distance) || 999)
-    const landCandidates = entities.filter(e => e && !e.hostile && land.includes(String(e.name || '').toLowerCase())).sort(byDist)
+    const landCandidates = entities.filter(e => e && !e.hostile && FOOD_ANIMALS_LAND.has(String(e.name || '').toLowerCase())).sort(byDist)
     if (landCandidates.length) return String(landCandidates[0].name)
-    const waterCandidates = entities.filter(e => e && !e.hostile && water.includes(String(e.name || '').toLowerCase()) && (Number(e.distance) || 999) <= 6).sort(byDist)
+    const waterCandidates = entities.filter(e => e && !e.hostile && FOOD_ANIMALS_WATER.has(String(e.name || '').toLowerCase()) && (Number(e.distance) || 999) <= 6).sort(byDist)
     if (waterCandidates.length) return String(waterCandidates[0].name)
+    return null
+  }
+
+  // 饥饿且无现成食物/猎物时：优先捡附近掉落物、采集浆果/作物、砍树（食物/木头两用），避免空 explore。
+  _survivalFoodFallback (state) {
+    const drops = Array.isArray(state.nearbyDrops) ? state.nearbyDrops : []
+    if (drops.length) return [{ name: 'collect', args: { radius: 8 } }]
+
+    const targets = Array.isArray(state.nearbyTargets) ? state.nearbyTargets : []
+    for (const t of targets) {
+      const n = String(t && t.name || '').toLowerCase()
+      if (n === 'sweet_berry_bush') return [{ name: 'collect', args: { radius: 6 } }]
+      if (FOOD_TARGET_BLOCKS.has(n)) return [{ name: 'collect', args: { radius: 8 } }]
+      if (n.endsWith('_log') || n.endsWith('_stem') || n === 'mushroom_stem') {
+        return [{ name: 'chopTree', args: { radius: 12 } }]
+      }
+    }
     return null
   }
 
@@ -1261,7 +1291,15 @@ class Brain {
         if (this._hasEdibleFood(state)) return [{ name: 'eat', args: {} }]
         const foodAnimal = this._nearestFoodAnimal(state)
         if (foodAnimal) return [{ name: 'hunt', args: { name: foodAnimal } }]
-        return [{ name: 'explore', args: { distance: 12 } }]
+        const foodSource = this._survivalFoodFallback(state)
+        if (foodSource) return foodSource
+        // 兜底：短距离探索找食物；explore 连续失败时先 wait 冷却，避免死循环刷寻路超时
+        const exploreArgs = { distance: 6 }
+        if (this._isActionBlocked('explore', exploreArgs)) {
+          this.agent.emit('log', { level: 'warn', message: 'survival: explore 连续失败，先等待冷却' })
+          return [{ name: 'wait', args: { ms: 15000 } }]
+        }
+        return [{ name: 'explore', args: exploreArgs }]
       }
       return null
     }

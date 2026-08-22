@@ -125,7 +125,7 @@ class BotAgent extends EventEmitter {
         const mcData = require('minecraft-data')(bot.version)
         // Bound path search work after the plugin has been injected. Unlimited
         // searches can monopolize the event loop on cliffs and cave systems.
-        bot.pathfinder.thinkTimeout = Math.max(250, Math.min(1500, Number(this.config.pathfinder?.thinkTimeoutMs ?? 350)))
+        bot.pathfinder.thinkTimeout = Math.max(250, Math.min(4000, Number(this.config.pathfinder?.thinkTimeoutMs ?? 350)))
         bot.pathfinder.tickTimeout = Math.max(3, Math.min(10, Number(this.config.pathfinder?.tickTimeoutMs ?? 3)))
         bot.pathfinder.searchRadius = Math.max(8, Math.min(64, Number(this.config.pathfinder?.searchRadius ?? 12)))
         this.movements = new Movements(bot, mcData)

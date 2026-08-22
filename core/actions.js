@@ -3,6 +3,17 @@ const { goals } = require('mineflayer-pathfinder')
 const observations = require('./observations')
 const combat = require('../lib/combat')
 
+const EDIBLE_FOOD = new Set([
+  'apple', 'golden_apple', 'enchanted_golden_apple', 'bread',
+  'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton',
+  'cooked_rabbit', 'cooked_cod', 'cooked_salmon',
+  'baked_potato', 'potato', 'carrot', 'golden_carrot', 'melon_slice',
+  'sweet_berries', 'glow_berries',
+  'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon', 'tropical_fish',
+  'cookie', 'pumpkin_pie', 'beetroot', 'beetroot_soup', 'mushroom_stew',
+  'rabbit_stew', 'suspicious_stew', 'dried_kelp', 'honey_bottle'
+])
+
 function abortError (reason) {
   const e = new Error(reason || 'task aborted')
   e.name = 'AbortError'
@@ -427,15 +438,29 @@ function findNearestBlockBy (bot, predicate, radius = 12, count = 128) {
 function probePathResult (bot, movements, goal, timeoutMs = 100) {
   if (!bot?.pathfinder || !movements || !bot.entity?.position || typeof bot.pathfinder.getPathFromTo !== 'function') return null
   try {
+    const totalTimeout = Math.max(25, Number(timeoutMs) || 100)
     const generator = bot.pathfinder.getPathFromTo(movements, bot.entity.position, goal, {
-      timeout: Math.max(25, timeoutMs),
-      tickTimeout: Math.min(20, Math.max(5, timeoutMs)),
+      timeout: totalTimeout,
+      tickTimeout: Math.min(20, Math.max(5, totalTimeout)),
       searchRadius: Math.min(12, Math.max(6, Number(bot.pathfinder.searchRadius) || 12)),
       optimizePath: true,
       resetEntityIntersects: false
     })
-    const next = generator.next()
-    return next && next.value ? next.value.result : null
+    // getPathFromTo is a generator: each .next() runs one bounded A* tick and
+    // yields { status: 'partial', ... } until a terminal status (success /
+    // timeout / noPath) is reached. Only the final yield carries the real
+    // result, so consume the generator fully instead of trusting the first
+    // partial (which used to make explore pick near-random directions). A
+    // wall-clock deadline guards against pathological runs that never finish.
+    const deadline = Date.now() + Math.max(100, totalTimeout * 4)
+    let step = generator.next()
+    let last = null
+    while (!step.done) {
+      if (step.value && step.value.result) last = step.value.result
+      if (Date.now() >= deadline) break
+      step = generator.next()
+    }
+    return last
   } catch {
     return null
   }
@@ -1164,6 +1189,15 @@ async function exploreForBuildResources (bot, ctx, attempts = 3) {
 }
 
 async function gatherAndCraftPlanks (bot, material, ctx, need) {
+  // 背包已有足够木板：直接成功返回，不砍树、不制作
+  const havePlanks = findPlankItem(bot, material)
+  if (havePlanks && countItemByName(bot, havePlanks.name) >= need) return havePlanks.name
+
+  // 附近没有树：快速返回清晰失败，避免长时间寻路挂起到 executor 超时
+  if (!findLogItem(bot, material) && !findNearestBlockBy(bot, isLogLike, 16, 64)) {
+    return { ok: false, reason: 'no-tree-nearby' }
+  }
+
   for (let attempt = 0; attempt < 5; attempt++) {
     let log = findLogItem(bot, material)
     if (!log) {
@@ -1172,8 +1206,9 @@ async function gatherAndCraftPlanks (bot, material, ctx, need) {
         if (chop && chop.preempted) return chop
       } catch (err) {
         if (err && (err.code === 'ABORT_ERR' || ctx?.signal?.aborted)) throw err
-        if (attempt >= 3 || !(err && (err.code === 'NO_TREE' || String(err.message || '').includes('附近没有可砍')))) throw err
-        const moved = await exploreForBuildResources(bot, ctx, 6)
+        if (attempt >= 2 || !(err && (err.code === 'NO_TREE' || String(err.message || '').includes('附近没有可砍')))) throw err
+        // 只做少量短距离移动尝试，避免反复寻路超时死循环
+        const moved = await exploreForBuildResources(bot, ctx, 2)
         if (moved && moved.preempted) return moved
         continue
       }
@@ -1183,7 +1218,10 @@ async function gatherAndCraftPlanks (bot, material, ctx, need) {
     const planks = findPlankItem(bot, material)
     if (planks && countItemByName(bot, planks.name) >= need) return planks.name
   }
-  return null
+  // 尝试结束仍不足：若有部分木板则返回部分成功，否则清晰失败
+  const leftover = findPlankItem(bot, material)
+  if (leftover) return leftover.name
+  return { ok: false, reason: 'no-tree-nearby' }
 }
 
 function isWoodMaterialRequest (material) {
@@ -1201,6 +1239,12 @@ async function ensureBuildMaterial (bot, material, ctx, need) {
   if (isWoodMaterialRequest(material)) {
     const planks = await gatherAndCraftPlanks(bot, material, ctx, need)
     if (planks && planks.preempted) return planks
+    if (planks && planks.ok === false) {
+      // 附近没有树：退回使用背包里已有的建筑材料
+      const fallback = chooseBuildBlock(bot, material, need)
+      if (fallback) return { material: fallback.name }
+      return null
+    }
     if (planks) {
       const item = chooseBuildBlock(bot, material, need)
       if (item && countItemByName(bot, item.name) >= need) return { material: item.name }
@@ -2036,7 +2080,10 @@ async function pathNearXZ (bot, ctx, x, z, range = 2.5, timeoutMs = 60000) {
         stagnantRetries = 0
         continue
       }
-      if ((r.kind === 'reached' || r.retryable) && ++stagnantRetries <= 1 && Date.now() + 500 < deadline) continue
+      // Give a retryable timeout/stall a few fresh replans: after the root
+      // cause fixes the pathfinder often needs 2-3 attempts to surface a
+      // usable partial path on cliffs/mountains before giving up.
+      if ((r.kind === 'reached' || r.retryable) && ++stagnantRetries <= 3 && Date.now() + 500 < deadline) continue
       return { ok: false, reason: lastReason }
     }
     return bestDistance <= range + 0.8 ? { ok: true } : { ok: false, reason: lastReason }
@@ -2075,7 +2122,10 @@ async function pathNear (bot, ctx, x, y, z, range = 1, timeoutMs = 60000) {
         stagnantRetries = 0
         continue
       }
-      if ((r.kind === 'reached' || r.retryable) && ++stagnantRetries <= 1 && Date.now() + 500 < deadline) continue
+      // Give a retryable timeout/stall a few fresh replans: after the root
+      // cause fixes the pathfinder often needs 2-3 attempts to surface a
+      // usable partial path on cliffs/mountains before giving up.
+      if ((r.kind === 'reached' || r.retryable) && ++stagnantRetries <= 3 && Date.now() + 500 < deadline) continue
       return { ok: false, reason: lastReason }
     }
     return bestDistance <= range + 0.9 ? { ok: true } : { ok: false, reason: lastReason }
@@ -2628,6 +2678,10 @@ const handlers = {
   chopTree: async (bot, args, ctx) => {
     const radius = Math.max(4, Math.min(Number(args.radius ?? 12), 24))
     const maxBlocks = Math.max(1, Math.min(Number(args.max ?? 64), 128))
+    // 附近没有树：快速失败，避免反复寻路超时
+    if (!findNearestBlockBy(bot, isLogLike, radius, 64)) {
+      throw new Error('附近没有可砍的树木')
+    }
     const result = await chopOneTree(bot, ctx, maxBlocks, radius)
     if (result.preempted) return result
     return `砍树完成，共挖掘 ${result.dug} 块原木`
@@ -3010,9 +3064,23 @@ const handlers = {
   craftPlanks: async (bot, args, ctx) => {
     const count = clampInt(args.count ?? args.amount, 1, 256, 16)
     const material = args.material ? String(args.material) : (args.log ? String(args.log) : null)
+    // 背包已有足够木板：直接成功返回，避免不必要砍树/卡死
+    const existing = findPlankItem(bot, material)
+    if (existing && countItemByName(bot, existing.name) >= count) {
+      return '已准备建筑材料 ' + existing.name + '，背包已有 ' + countItemByName(bot, existing.name) + ' 个（目标 ' + count + '）'
+    }
+    // 附近没有树：快速返回清晰失败，而不是挂到 skillTimeout
+    if (!findLogItem(bot, material) && !findNearestBlockBy(bot, isLogLike, 16, 64)) {
+      return { ok: false, reason: 'no-tree-nearby' }
+    }
     const planks = await gatherAndCraftPlanks(bot, material, ctx, count)
     if (planks && planks.preempted) return planks
-    if (!planks) throw new Error(material ? '无法制作指定建材: ' + material : '附近没有可用来制作木板的树木')
+    if (planks && planks.ok === false) return planks
+    if (!planks) return { ok: false, reason: 'no-tree-nearby' }
+    const have = countItemByName(bot, planks)
+    if (have < count) {
+      return '已准备建筑材料 ' + planks + '，背包已有 ' + have + ' 个（目标 ' + count + '），附近暂时找不到更多木材'
+    }
     return '已准备建筑材料 ' + planks + '，目标数量 ' + count
   },
 
@@ -3044,8 +3112,7 @@ const handlers = {
     const item = bot.inventory.items().find(i => {
       if (!i) return false
       if (name && i.name !== name && i.displayName?.toLowerCase() !== name) return false
-      const food = ['apple', 'golden_apple', 'bread', 'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton', 'cooked_rabbit', 'cooked_cod', 'cooked_salmon', 'baked_potato', 'carrot', 'melon_slice', 'sweet_berries', 'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon']
-      return food.includes(i.name)
+      return EDIBLE_FOOD.has(i.name)
     })
     if (!item) throw new Error('背包里没有可食用食物: ' + (name || '任意'))
     await combat.consumePreserveLoadout(bot, item)
