@@ -217,6 +217,41 @@ git -c http.sslVerify=false -c http.extraHeader="Host: github.com" push $url HEA
 - `PUT /api/ai/config` — 修改唤醒词和成员列表（同步更新运行时）
 - `GET /api/ai/players` — 获取在线玩家（方便后台管理）
 
+
+## 2026-08-22 未完成修复交接（smoke 通过，实服未确认）
+
+本轮用户喊停，以下问题尚未在服务器上最终确认，下次继续修。当前**不要提交**（工作树还有 `M ai/brain.js`、`M core/actions.js` 和未跟踪的 `.tmp-patches/`）。
+
+### 本轮已做的代码改动（语法与 smoke 已通过，但未实服确认）
+1. `core/actions.js - ensureSticks`：背包没有原木但附近有树时，先 `gatherAndCraftPlanks` 取木板，再合成木棍，避免缺原木直接失败。
+2. `core/actions.js - craftOneItem`：`STONE_TOOL_ITEMS` 与木制工具一样先准备木棍/木板。
+3. `core/actions.js - craftGear`：删除石质兜底循环前计算的旧 `hasPickaxe`，把 `hasPickaxe` 重算移到石质兜底循环之后，避免“石镐已做出但仍误判缺镐”。
+4. `core/actions.js - explore`：第一次寻路不开启 `movements.canDig`，重试时才允许挖掘，缩小 A* 搜索空间，降低 timeout。
+5. `ai/brain.js - _survivalPriority`：当 `explore {distance:6}` 处于失败冷却时返回 `null`，让主计划继续推进，避免反复 wait 15s 死循环。
+
+验证：`"D:\New Folder\node.exe" --check core/actions.js`、`--check ai/brain.js`、`scripts/check.js`、`scripts/smoke.js` 均通过。
+
+### 仍需修复/确认的问题（下次优先）
+1. **`craft stone_pickaxe` 仍连续失败**：日志 `动作队列失败于 craft: 制作失败: stone_pickaxe`。已修复石质工具准备木棍逻辑，但未在实服确认。下次先看 `/api/observations` 的 inventory，确认 `stick`、`cobblestone`、`crafting_table` 是否齐全，并检查 `bot.recipesFor(stone_pickaxe)` 是否有可用配方。
+2. **`explore {distance:6}` 仍反复 `寻路失败: timeout`**：已加第一次不带 canDig 的修复，未确认实服是否有效。下次观察日志或用 `/api/actions` 手动触发 explore 验证。
+3. **生存饥饿循环**：`food=0`、`health≈7.83`，附近有僵尸/蜘蛛/苦力怕/骷髅/末影人。之前机器人在 explore 与 wait 15s 之间反复循环；已改为跳过生存 explore 让主计划推进，但需确认是否还会因饥饿空转。
+4. **击杀末影龙后续长链路未实测**：`core/actions.js` 约 3178~3400 行，下次逐个验证 `mineBlock`、`smelt`、`buildNetherPortal`、`enterPortal`、`obtainBlazeRods`、`obtainEnderPearls`、`findStronghold`、`activateEndPortal`、`fightEnderDragon`。
+
+### 下次继续前先做
+1. `cd D:\minecraft-bot`，读 `logs/agent.log`，搜索 `stone_pickaxe` 与 `寻路失败`。
+2. 看 `/api/observations` 的 inventory 与 `/api/status` 的 health/food/计划状态。
+3. 先修 1、2、3，再逐个实测长链路 4，全部确认可用后再提交。
+
+### 运行时状态参考（本轮停止时）
+- 机器人进程 PID `16144`：`"D:\New Folder\node.exe" index.js`。
+- `/api/status`：`connected=true`，`health=7.83`，`food=0`，`saturation=0`，坐标约 `315.5,74,-47.5` 主世界，`aiRunning=true`，`activeStep=8`，`actionsRun=151`（成功 75 / 失败 76）。
+- inventory 关键物品：`cobblestone x39`、`crafting_table x1`、`furnace x1`、`wooden_sword/axe/shovel`、`stone_sword`、`coal x54`、`torch x8`；未看到 `stick`、`stone_pickaxe`。
+- 附近敌对实体：zombie、spider、enderman、creeper、skeleton；可见矿：copper_ore、coal_ore。
+
+### 模型/Key 约束（下次继续沿用）
+- `config.json`：`model: deepseek-v4-pro`，`apiKey: sk-ea2a0b95764643f38e24fb0694f69f57f9ae99e5eea4e1dc7cddad5f2e1c6c7a`，`baseUrl: https://matchfit.top/v1`。
+- 不要用旧 key `sk-2128...`。
+- Node 必须用 `"D:\New Folder\node.exe"`。
 ## 下次继续做事的建议顺序
 1. 先跑：
 ```powershell

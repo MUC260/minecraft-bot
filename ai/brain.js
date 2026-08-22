@@ -1296,8 +1296,8 @@ class Brain {
         // 兜底：短距离探索找食物；explore 连续失败时先 wait 冷却，避免死循环刷寻路超时
         const exploreArgs = { distance: 6 }
         if (this._isActionBlocked('explore', exploreArgs)) {
-          this.agent.emit('log', { level: 'warn', message: 'survival: explore 连续失败，先等待冷却' })
-          return [{ name: 'wait', args: { ms: 15000 } }]
+          this.agent.emit('log', { level: 'warn', message: 'survival: explore 连续失败，跳过探索让主计划推进' })
+          return null
         }
         return [{ name: 'explore', args: exploreArgs }]
       }

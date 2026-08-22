@@ -708,9 +708,15 @@ async function craftItem (bot, itemName, ctx, count = 1, table = null) {
 async function ensureSticks (bot, ctx, need = 2) {
   if (countItemByName(bot, 'stick') >= need) return true
   if (countMaterialFamily(bot, '_planks') < 2) {
-    const log = findLogItem(bot, null)
-    if (!log) return false
-    await craftPlanksFromLog(bot, log, 4, ctx)
+    let log = findLogItem(bot, null)
+    if (!log) {
+      const planks = await gatherAndCraftPlanks(bot, null, ctx, 2)
+      if (planks && planks.preempted) return planks
+      log = findLogItem(bot, null)
+    } else {
+      await craftPlanksFromLog(bot, log, 4, ctx)
+    }
+    if (!log && countMaterialFamily(bot, '_planks') < 2) return false
   }
   if (countMaterialFamily(bot, '_planks') < 2) return false
   return craftItem(bot, 'stick', ctx, 1, null)
@@ -824,7 +830,7 @@ async function craftOneItem (bot, itemName, ctx, count = 1) {
     throw new Error('无法制作板材: ' + itemName)
   }
 
-  if (WOOD_TOOL_ITEMS.has(itemName) || itemName === 'stick') {
+  if (WOOD_TOOL_ITEMS.has(itemName) || STONE_TOOL_ITEMS.has(itemName) || itemName === 'stick') {
     const prepared = await ensureWoodMaterialsForCraft(bot, itemName, ctx)
     if (prepared && prepared.preempted) return prepared
     if (!prepared) throw new Error('材料不足，无法制作: ' + itemName)
@@ -1960,7 +1966,7 @@ function waitForGoal (bot, ctx, timeoutMs = 60000) {
       // useful node yet.  Do not report failure immediately: the pathfinder
       // can replan from the same position on the next tick.  The caller has a
       // finite retry budget, so an actually impossible route still exits.
-      if (r.status === 'timeout') finish('timeout', { retryable: !hasUsablePath })
+      if (r.status === 'timeout') return
     }
     const onAbort = () => finish('preempted')
 
@@ -2154,7 +2160,7 @@ function formatInventoryText (bot) {
   return held + '\uff1b\u80cc\u5305\uff1a' + (lines || '\u7a7a') + '\uff1b' + armorText + '\uff1b' + weaponText + '\uff1b' + shieldText
 }
 
-function chooseReachableExploreTarget (bot, distance, preferredDirection = '') {
+async function chooseReachableExploreTarget (bot, distance, preferredDirection = '') {
   const p = bot.entity.position
   const vectors = {
     north: [0, -1],
@@ -2186,7 +2192,8 @@ function chooseReachableExploreTarget (bot, distance, preferredDirection = '') {
   const radii = [...new Set([maxProbe, Math.min(4, distance), 2.5])]
   const stages = radii.map(radius => ({ radius, canDig: false }))
     .concat(radii.map(radius => ({ radius, canDig: true })))
-  let best = null
+  let bestPartial = null
+  const probeDeadline = Date.now() + 4000
   try {
     // Allow 1x1 tower-up during probing so pillar-climbing escape routes are
     // visible to the pathfinder; restored in finally.
@@ -2194,36 +2201,43 @@ function chooseReachableExploreTarget (bot, distance, preferredDirection = '') {
     for (const stage of stages) {
       if (movements && stage.canDig !== undefined) movements.canDig = stage.canDig
       for (const candidate of candidates) {
+        if (Date.now() >= probeDeadline) break
         const [rawX, rawZ] = candidate.vector
         const length = Math.hypot(rawX, rawZ) || 1
         const ux = rawX / length
         const uz = rawZ / length
         const localX = p.x + ux * stage.radius
         const localZ = p.z + uz * stage.radius
-        const result = probePathResult(bot, movements, new goals.GoalNearXZ(localX, localZ, 1.25), 80)
+        const result = probePathResult(bot, movements, new goals.GoalNearXZ(localX, localZ, 1.25), 250)
         if (!result || !Array.isArray(result.path)) continue
         const pathLength = result.path.length
         if (result.status !== 'success' && pathLength < 2) continue
-        const score = (result.status === 'success' ? 1000 : 0) + pathLength - (candidate.name === preferredDirection ? 0 : 0.25)
-        if (!best || score > best.score) {
-          // Degraded (shorter) probes return a closer target so the bot makes
-          // incremental progress instead of failing the full distance again.
-          const targetDistance = stage.radius >= maxProbe ? distance : stage.radius
-          best = {
-            x: p.x + ux * targetDistance,
-            z: p.z + uz * targetDistance,
-            direction: candidate.name,
-            score
-          }
+        // Degraded (shorter) probes return a closer target so the bot makes
+        // incremental progress instead of failing the full distance again.
+        const targetDistance = stage.radius >= maxProbe ? distance : stage.radius
+        const target = {
+          x: p.x + ux * targetDistance,
+          z: p.z + uz * targetDistance,
+          direction: candidate.name
         }
+        // Only a full success path is actually reachable end-to-end. A partial
+        // or timeout probe was previously returned immediately and pathNearXZ
+        // then burned its whole timeout on an unreachable point. Return the
+        // first confirmed route and keep the best partial only as a fallback.
+        if (result.status === 'success') return target
+        if (!bestPartial || pathLength > bestPartial.pathLength) {
+          bestPartial = { x: target.x, z: target.z, direction: target.direction, pathLength }
+        }
+        // Yield so a longer probe sweep never blocks Express/physics/chat.
+        await Promise.resolve()
       }
-      if (best) return best
+      if (Date.now() >= probeDeadline) break
     }
   } finally {
     if (movements && originalCanDig !== undefined) movements.canDig = originalCanDig
     if (movements && originalAllow1by1Towers !== undefined) movements.allow1by1towers = originalAllow1by1Towers
   }
-  return best
+  return bestPartial
 }
 
 function countInventoryItem (bot, name) {
@@ -2386,16 +2400,17 @@ const handlers = {
       if (movements) movements.allow1by1towers = true
       if (movements) movements.maxDropDown = 5
       for (let attempt = 0; attempt < 3; attempt++) {
-        const target = chooseReachableExploreTarget(bot, distance, attempt === 0 ? dir : '')
+        const target = await chooseReachableExploreTarget(bot, distance, attempt === 0 ? dir : '')
         if (!target) {
           // No reachable target even after distance/direction/dig degradation:
           // report a clean failure so the decision loop can switch to mining,
           // placing or crafting instead of retrying explore forever.
           return { ok: false, reason: 'no-reachable-explore-target' }
         }
-        // Allow 1x1 digging only while this explore navigates so a thin
-        // dirt/stone/water wall cannot stall the bot; restored in finally.
-        if (movements) movements.canDig = true
+        // Keep the first attempt dig-free: with canDig the A* search space
+        // explodes and frequently hits the think-timeout before finding a path.
+        // Only enable digging on retries when a thin wall blocks the way.
+        if (movements) movements.canDig = attempt >= 1
         const nav = await pathNearXZ(bot, ctx, target.x, target.z, 2, 16000)
         if (nav && nav.preempted) return nav
         if (nav && nav.ok) return '已到达 ' + Math.floor(target.x) + ',' + Math.floor(target.z)
@@ -3017,8 +3032,9 @@ const handlers = {
     if (picked && picked.preempted) return picked
 
     const missingBefore = GEAR_PRIORITY.filter(itemName => !findInventoryItemByName(bot, itemName))
-    if (missingBefore.length && countMaterialFamily(bot, '_planks') < 20) {
-      const planks = await gatherAndCraftPlanks(bot, null, ctx, 20)
+    const planksNeeded = missingBefore.reduce((n, itemName) => n + toolPlanksNeeded(itemName) + 1, 0)
+    if (planksNeeded > 0 && countMaterialFamily(bot, '_planks') < planksNeeded) {
+      const planks = await gatherAndCraftPlanks(bot, null, ctx, planksNeeded)
       if (planks && planks.preempted) return planks
     }
     if (!findCraftingTableBlock(bot, 8)) await ensureCraftingTable(bot, ctx)
@@ -3046,10 +3062,34 @@ const handlers = {
       } catch {}
     }
 
-    const missing = GEAR_PRIORITY.filter(itemName => !findInventoryItemByName(bot, itemName))
-    if (missing.length) {
+    // Stone-tool fallback: when no tree is nearby the bot can still craft
+    // stone tools from cobblestone it already mined, so mining is not blocked.
+    for (const itemName of STONE_TOOL_ITEMS) {
+      throwIfAborted(ctx)
+      if (findInventoryItemByName(bot, itemName)) continue
+      if (countItemByName(bot, 'cobblestone') < 3) continue
+      if (countItemByName(bot, 'stick') < 2) {
+        try { await ensureSticks(bot, ctx, 2) } catch {}
+      }
+      if (countItemByName(bot, 'stick') < 2) continue
+      try {
+        const r = await craftOneItem(bot, itemName, ctx, 1)
+        if (r && r.preempted) return r
+        if (typeof r === 'string') made.push(itemName)
+      } catch (err) {
+        failures.push(itemName + ': ' + String(err && err.message ? err.message : err))
+      }
+    }
+    const hasPickaxe = ['wooden_pickaxe', 'stone_pickaxe', 'iron_pickaxe', 'diamond_pickaxe'].some(n => findInventoryItemByName(bot, n))
+    const missing = GEAR_PRIORITY.filter(itemName => {
+      if (findInventoryItemByName(bot, itemName)) return false
+      const stone = 'stone_' + itemName.slice('wooden_'.length)
+      return !findInventoryItemByName(bot, stone)
+    })
+    const blocking = hasPickaxe ? [] : missing.filter(n => n.includes('pickaxe'))
+    if (blocking.length) {
       const detail = failures.length ? ('\uff1b' + failures.slice(0, 4).join('\uff1b')) : ''
-      throw new Error('\u88c5\u5907\u5236\u4f5c\u672a\u5b8c\u6210\uff0c\u7f3a\u5c11: ' + missing.join(', ') + detail)
+      throw new Error('\u88c5\u5907\u5236\u4f5c\u672a\u5b8c\u6210\uff0c\u7f3a\u5c11: ' + blocking.join(', ') + detail)
     }
 
     let equipped = []
